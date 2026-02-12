@@ -414,36 +414,85 @@
       }
 
       function chooseSpareSwitchOption(action) {
-        if (!action || typeof action !== 'object') return null;
+        if (!action || typeof action !== 'object') return Promise.resolve(null);
         const metadata = action.metadata && typeof action.metadata === 'object' ? action.metadata : {};
         const options = Array.isArray(metadata.switch_options)
           ? metadata.switch_options.filter(item => item && item.device_id)
           : [];
         if (!options.length) {
-          return { error: 'No switch options are available for this site.' };
+          return Promise.resolve({ error: 'No switch options are available for this site.' });
         }
-        const optionLines = options.map((item, index) => `${index + 1}. ${item.device_name || item.device_id}`);
-        const siteName = typeof metadata.site_name === 'string' && metadata.site_name.trim() ? metadata.site_name.trim() : 'this site';
-        const selectedValue = window.prompt(
-          `Select the spare switch for ${siteName}:
 
-${optionLines.join('\n')}
+        return new Promise(resolve => {
+          const siteName = typeof metadata.site_name === 'string' && metadata.site_name.trim() ? metadata.site_name.trim() : 'this site';
+          const overlay = document.createElement('div');
+          overlay.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4';
 
-Enter the number of the switch.`
-        );
-        if (selectedValue == null) {
-          return { cancelled: true };
-        }
-        const selectedIndex = Number.parseInt(String(selectedValue).trim(), 10);
-        if (!Number.isFinite(selectedIndex) || selectedIndex < 1 || selectedIndex > options.length) {
-          return { error: 'Invalid switch selection. Please choose one of the listed switches.' };
-        }
-        const selected = options[selectedIndex - 1];
-        const selectedSwitchId = selected && selected.device_id ? String(selected.device_id) : '';
-        if (!selectedSwitchId) {
-          return { error: 'Selected switch is invalid.' };
-        }
-        return { selectedSwitchId, selectedSwitchName: selected.device_name || selectedSwitchId };
+          const panel = document.createElement('div');
+          panel.className = 'w-full max-w-md rounded-lg border bg-white p-4 shadow-lg dark:border-slate-700 dark:bg-slate-900';
+
+          const title = document.createElement('h3');
+          title.className = 'text-sm font-semibold text-slate-900 dark:text-slate-100';
+          title.textContent = `Select the spare switch for ${siteName}`;
+
+          const helper = document.createElement('p');
+          helper.className = 'mt-1 text-xs text-slate-600 dark:text-slate-300';
+          helper.textContent = 'Choose one eligible switch to assign the spare role.';
+
+          const select = document.createElement('select');
+          select.className = 'mt-3 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100';
+          options.forEach(item => {
+            const option = document.createElement('option');
+            option.value = String(item.device_id);
+            option.textContent = item.device_name || item.device_id;
+            select.appendChild(option);
+          });
+
+          const actions = document.createElement('div');
+          actions.className = 'mt-4 flex justify-end gap-2';
+
+          const cancelButton = document.createElement('button');
+          cancelButton.type = 'button';
+          cancelButton.className = 'rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800';
+          cancelButton.textContent = 'Cancel';
+
+          const confirmButton = document.createElement('button');
+          confirmButton.type = 'button';
+          confirmButton.className = 'rounded bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 dark:bg-slate-200 dark:text-slate-900 dark:hover:bg-slate-300';
+          confirmButton.textContent = 'Select switch';
+
+          const close = payload => {
+            overlay.remove();
+            resolve(payload);
+          };
+
+          cancelButton.addEventListener('click', () => close({ cancelled: true }));
+          confirmButton.addEventListener('click', () => {
+            const selectedSwitchId = String(select.value || '').trim();
+            if (!selectedSwitchId) {
+              close({ error: 'Selected switch is invalid.' });
+              return;
+            }
+            const selected = options.find(item => String(item.device_id) === selectedSwitchId);
+            close({ selectedSwitchId, selectedSwitchName: (selected && selected.device_name) || selectedSwitchId });
+          });
+
+          overlay.addEventListener('click', event => {
+            if (event.target === overlay) {
+              close({ cancelled: true });
+            }
+          });
+
+          panel.appendChild(title);
+          panel.appendChild(helper);
+          panel.appendChild(select);
+          actions.appendChild(cancelButton);
+          actions.appendChild(confirmButton);
+          panel.appendChild(actions);
+          overlay.appendChild(panel);
+          document.body.appendChild(overlay);
+          select.focus();
+        });
       }
 
       async function runOneClickFix(action, button) {
@@ -470,7 +519,7 @@ Enter the number of the switch.`
           ? { ...action.metadata }
           : {};
         if (metadataPayload.require_switch_selection === true) {
-          const selection = chooseSpareSwitchOption(action);
+          const selection = await chooseSpareSwitchOption(action);
           if (selection && selection.cancelled) {
             showStatus('1 Click Fix cancelled.', 'info');
             return;

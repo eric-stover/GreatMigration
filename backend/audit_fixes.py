@@ -143,9 +143,10 @@ def _get_json(
     path: str,
     *,
     optional: bool = False,
+    params: Optional[Dict[str, Any]] = None,
 ) -> Any:
     url = f"{base_url}{path}"
-    response = requests.get(url, headers=headers, timeout=30)
+    response = requests.get(url, headers=headers, params=params or None, timeout=30)
     if optional and response.status_code == 404:
         return {}
     response.raise_for_status()
@@ -428,7 +429,7 @@ def _update_device_payload(
     response.raise_for_status()
 
 
-FPC0_INTERFACE_PATTERN = re.compile(r"^(?:ge|xe|et)-0/0/", re.IGNORECASE)
+PHYSICAL_SWITCH_INTERFACE_PATTERN = re.compile(r"^(?:ge|xe|et|mge)-\d+/\d+/\d+(?:\.\d+)?$", re.IGNORECASE)
 
 
 def _is_truthy_link_state(value: Any) -> bool:
@@ -460,7 +461,7 @@ def _interface_up_from_entry(entry: Mapping[str, Any]) -> bool:
     return False
 
 
-def _has_active_fpc0_ports(value: Any, visited: Optional[Set[int]] = None) -> bool:
+def _has_active_physical_switch_ports(value: Any, visited: Optional[Set[int]] = None) -> bool:
     if visited is None:
         visited = set()
     obj_id = id(value)
@@ -470,15 +471,15 @@ def _has_active_fpc0_ports(value: Any, visited: Optional[Set[int]] = None) -> bo
 
     if isinstance(value, Mapping):
         interface_name = _interface_name_from_entry(value)
-        if interface_name and FPC0_INTERFACE_PATTERN.match(interface_name):
+        if interface_name and PHYSICAL_SWITCH_INTERFACE_PATTERN.match(interface_name):
             if _interface_up_from_entry(value):
                 return True
         for nested in value.values():
-            if _has_active_fpc0_ports(nested, visited):
+            if _has_active_physical_switch_ports(nested, visited):
                 return True
     elif isinstance(value, (list, tuple, set)):
         for nested in value:
-            if _has_active_fpc0_ports(nested, visited):
+            if _has_active_physical_switch_ports(nested, visited):
                 return True
     return False
 
@@ -546,14 +547,20 @@ def _execute_set_spare_switch_role_action(
             totals["failed"] += 1
             continue
 
-        stats_doc = _get_json(base_url, headers, f"/sites/{site_id}/stats/devices/{target_switch_id}", optional=True)
-        if _has_active_fpc0_ports(stats_doc):
+        stats_doc = _get_json(
+            base_url,
+            headers,
+            f"/sites/{site_id}/stats/devices/{target_switch_id}",
+            optional=True,
+            params={"type": "switch"},
+        )
+        if _has_active_physical_switch_ports(stats_doc):
             summary["failed"] += 1
             summary["errors"].append(
                 {
                     "device_id": target_switch_id,
                     "device_name": device_name,
-                    "reason": "Switch is currently in use by users (active FPC 0 ports detected).",
+                    "reason": "Devices are currently connected to the spare switch and should be moved to the MDF access layer first",
                 }
             )
             summary["changes"].append(
@@ -561,7 +568,7 @@ def _execute_set_spare_switch_role_action(
                     "device_id": target_switch_id,
                     "device_name": device_name,
                     "status": "failed",
-                    "reason": "Switch is currently in use by users (active FPC 0 ports detected).",
+                    "reason": "Devices are currently connected to the spare switch and should be moved to the MDF access layer first",
                 }
             )
             results.append(summary)
@@ -613,10 +620,11 @@ def _execute_set_spare_switch_role_action(
 
         if dry_run:
             change_entry["status"] = "preview"
-            change_entry["message"] = "Would assign spare role and enforce switch naming convention."
+            change_entry["message"] = "Would clear port config, assign spare role, and enforce switch naming convention."
             summary["updated"] += 1
         else:
             try:
+                _update_device_payload(base_url, headers, site_id, target_switch_id, {"port_config": {}})
                 _update_device_payload(base_url, headers, site_id, target_switch_id, payload)
             except requests.HTTPError as exc:
                 summary["failed"] += 1
@@ -631,7 +639,7 @@ def _execute_set_spare_switch_role_action(
                 change_entry["reason"] = "Failed to update switch role/name."
             else:
                 change_entry["status"] = "success"
-                change_entry["message"] = "Assigned spare switch role."
+                change_entry["message"] = "Cleared port config and assigned spare switch role."
                 summary["updated"] += 1
 
         summary["changes"].append(change_entry)
