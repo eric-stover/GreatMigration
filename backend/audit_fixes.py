@@ -429,7 +429,10 @@ def _update_device_payload(
     response.raise_for_status()
 
 
-PHYSICAL_SWITCH_INTERFACE_PATTERN = re.compile(r"^(?:ge|xe|et|mge)-\d+/\d+/\d+(?:\.\d+)?$", re.IGNORECASE)
+PHYSICAL_SWITCH_INTERFACE_PATTERN = re.compile(
+    r"^(?:ge|xe|et|mge)-(?P<fpc>\d+)/(?P<pic>\d+)/(?P<port>\d+)(?:\.\d+)?$",
+    re.IGNORECASE,
+)
 
 
 def _is_truthy_link_state(value: Any) -> bool:
@@ -471,8 +474,9 @@ def _has_active_physical_switch_ports(value: Any, visited: Optional[Set[int]] = 
 
     if isinstance(value, Mapping):
         interface_name = _interface_name_from_entry(value)
-        if interface_name and PHYSICAL_SWITCH_INTERFACE_PATTERN.match(interface_name):
-            if _interface_up_from_entry(value):
+        if interface_name:
+            match = PHYSICAL_SWITCH_INTERFACE_PATTERN.match(interface_name)
+            if match and match.group("pic") == "0" and _interface_up_from_entry(value):
                 return True
         for nested in value.values():
             if _has_active_physical_switch_ports(nested, visited):
