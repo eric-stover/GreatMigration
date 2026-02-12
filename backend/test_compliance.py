@@ -985,7 +985,7 @@ def test_configuration_overrides_check_allows_wan_mgmt_and_oob_blocks():
                         "gateway": "10.20.20.1",
                         "netmask": "255.255.255.0",
                         "use_mgmt_vrf": True,
-                        "use_mgmt_vrf_for_host_out": False,
+                        "use_mgmt_vrf_for_host_out": True,
                     },
                 },
             }
@@ -1089,7 +1089,7 @@ def test_configuration_overrides_check_flags_invalid_wan_oob_config():
                         "gateway": None,
                         "netmask": "",
                         "use_mgmt_vrf": False,
-                        "use_mgmt_vrf_for_host_out": True,
+                        "use_mgmt_vrf_for_host_out": False,
                     }
                 },
             }
