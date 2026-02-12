@@ -993,11 +993,11 @@ def _evaluate_wan_oob_ip_config(actual: Any) -> List[Dict[str, Any]]:
         )
 
     use_mgmt_host_out = actual.get("use_mgmt_vrf_for_host_out")
-    if use_mgmt_host_out is not False:
+    if use_mgmt_host_out is not True:
         diffs.append(
             _make_diff(
                 "oob_ip_config.use_mgmt_vrf_for_host_out",
-                False,
+                True,
                 use_mgmt_host_out,
             )
         )
