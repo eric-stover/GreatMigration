@@ -413,6 +413,40 @@
         return result;
       }
 
+      function chooseSpareSwitchOption(action) {
+        if (!action || typeof action !== 'object') return null;
+        const metadata = action.metadata && typeof action.metadata === 'object' ? action.metadata : {};
+        const options = Array.isArray(metadata.switch_options)
+          ? metadata.switch_options.filter(item => item && item.device_id)
+          : [];
+        if (!options.length) {
+          return { error: 'No switch options are available for this site.' };
+        }
+        const optionLines = options.map((item, index) => `${index + 1}. ${item.device_name || item.device_id}`);
+        const siteName = typeof metadata.site_name === 'string' && metadata.site_name.trim() ? metadata.site_name.trim() : 'this site';
+        const selectedValue = window.prompt(
+          `Select the spare switch for ${siteName}:
+
+${optionLines.join('
+')}
+
+Enter the number of the switch.`
+        );
+        if (selectedValue == null) {
+          return { cancelled: true };
+        }
+        const selectedIndex = Number.parseInt(String(selectedValue).trim(), 10);
+        if (!Number.isFinite(selectedIndex) || selectedIndex < 1 || selectedIndex > options.length) {
+          return { error: 'Invalid switch selection. Please choose one of the listed switches.' };
+        }
+        const selected = options[selectedIndex - 1];
+        const selectedSwitchId = selected && selected.device_id ? String(selected.device_id) : '';
+        if (!selectedSwitchId) {
+          return { error: 'Selected switch is invalid.' };
+        }
+        return { selectedSwitchId, selectedSwitchName: selected.device_name || selectedSwitchId };
+      }
+
       async function runOneClickFix(action, button) {
         if (!action || !action.id) {
           showStatus('Unable to start 1 Click Fix (missing action id).', 'error');
@@ -433,6 +467,27 @@
           return;
         }
 
+        const metadataPayload = action.metadata && typeof action.metadata === 'object'
+          ? { ...action.metadata }
+          : {};
+        if (metadataPayload.require_switch_selection === true) {
+          const selection = chooseSpareSwitchOption(action);
+          if (selection && selection.cancelled) {
+            showStatus('1 Click Fix cancelled.', 'info');
+            return;
+          }
+          if (selection && selection.error) {
+            showStatus(selection.error, 'error');
+            if (button) {
+              applyActionStatus(button, selection.error, 'error');
+            }
+            return;
+          }
+          if (selection && selection.selectedSwitchId) {
+            metadataPayload.selected_switch_id = selection.selectedSwitchId;
+          }
+        }
+
         const originalLabel = button ? button.textContent : '';
         const originalDisabled = button ? button.disabled : false;
         if (button) {
@@ -450,7 +505,7 @@
               action_id: action.id,
               site_ids: siteIds,
               devices: deviceTargets,
-              metadata: action.metadata,
+              metadata: metadataPayload,
             }),
           });
           const data = await response.json().catch(() => ({}));

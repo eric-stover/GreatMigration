@@ -15,6 +15,7 @@ from audit_actions import (
     CLEAR_DNS_OVERRIDE_ACTION_ID,
     ENABLE_CLOUD_MANAGEMENT_ACTION_ID,
     SET_SITE_VARIABLES_ACTION_ID,
+    SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
 
 
@@ -1870,6 +1871,33 @@ class SpareSwitchPresenceCheck(ComplianceCheck):
                 spare_count += 1
 
         if spare_count == 0:
+            candidate_switches = []
+            for device in switches:
+                device_id = device.get("id")
+                if device_id is None:
+                    continue
+                name = _normalize_site_name(device) or str(device_id)
+                candidate_switches.append(
+                    {
+                        "device_id": str(device_id),
+                        "device_name": name,
+                    }
+                )
+            actions: Optional[List[Dict[str, Any]]] = None
+            if candidate_switches:
+                actions = [
+                    {
+                        "id": SET_SPARE_SWITCH_ROLE_ACTION_ID,
+                        "label": "Assign spare switch role",
+                        "button_label": "1 Click Fix Now",
+                        "site_ids": [context.site_id],
+                        "metadata": {
+                            "site_name": context.site_name,
+                            "switch_options": candidate_switches,
+                            "require_switch_selection": True,
+                        },
+                    }
+                ]
             findings.append(
                 Finding(
                     site_id=context.site_id,
@@ -1879,6 +1907,7 @@ class SpareSwitchPresenceCheck(ComplianceCheck):
                         "total_switches": len(switches),
                         "spare_switches": spare_count,
                     },
+                    actions=actions,
                 )
             )
 

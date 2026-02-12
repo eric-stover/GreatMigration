@@ -27,6 +27,7 @@ from audit_actions import (
     CLEAR_DNS_OVERRIDE_ACTION_ID,
     ENABLE_CLOUD_MANAGEMENT_ACTION_ID,
     SET_SITE_VARIABLES_ACTION_ID,
+    SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
 
 
@@ -570,6 +571,12 @@ def test_spare_switch_presence_flags_missing_spare():
     assert findings[0].device_id is None
     assert "role 'spare'" in findings[0].message
     assert findings[0].details == {"total_switches": 2, "spare_switches": 0}
+    assert findings[0].actions is not None
+    action = findings[0].actions[0]
+    assert action["id"] == SET_SPARE_SWITCH_ROLE_ACTION_ID
+    assert action["button_label"] == "1 Click Fix Now"
+    assert action["metadata"]["require_switch_selection"] is True
+    assert len(action["metadata"]["switch_options"]) == 2
 
 
 def test_spare_switch_presence_allows_spare_role():
