@@ -382,16 +382,41 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
 
 
 def _load_allowed_versions_from_standard_doc(device_type: str) -> Tuple[str, ...]:
+    """Return distinct allowed versions for a device type across all models."""
+
+    by_model = _load_allowed_versions_by_model_from_standard_doc(device_type)
+    versions: List[str] = []
+    seen: Set[str] = set()
+    for allowed_versions in by_model.values():
+        for version in allowed_versions:
+            if version in seen:
+                continue
+            seen.add(version)
+            versions.append(version)
+    return tuple(versions)
+
+
+def _normalize_device_model(model: Any) -> str:
+    if not isinstance(model, str):
+        return ""
+    return model.strip().strip('"').strip("'").upper()
+
+
+def _load_allowed_versions_by_model_from_standard_doc(device_type: str) -> Dict[str, Tuple[str, ...]]:
     doc = _refresh_firmware_standards_if_needed()
     models = doc.get("models") if isinstance(doc.get("models"), Mapping) else {}
     type_blob = models.get(device_type) if isinstance(models, Mapping) else {}
     if not isinstance(type_blob, Mapping):
-        return ()
-    versions: List[str] = []
-    seen: Set[str] = set()
-    for entries in type_blob.values():
+        return {}
+    versions_by_model: Dict[str, Tuple[str, ...]] = {}
+    for model, entries in type_blob.items():
+        model_key = _normalize_device_model(model)
+        if not model_key:
+            continue
         if not isinstance(entries, list):
             continue
+        versions: List[str] = []
+        seen: Set[str] = set()
         for item in entries:
             if not isinstance(item, Mapping):
                 continue
@@ -403,7 +428,8 @@ def _load_allowed_versions_from_standard_doc(device_type: str) -> Tuple[str, ...
                 continue
             seen.add(normalized)
             versions.append(normalized)
-    return tuple(versions)
+        versions_by_model[model_key] = tuple(versions)
+    return versions_by_model
 
 
 class RequiredSiteVariablesCheck(ComplianceCheck):
@@ -1992,14 +2018,18 @@ class FirmwareManagementCheck(ComplianceCheck):
         self._dynamic_ap_versions = allowed_ap_versions is None
         self.allowed_switch_versions: Tuple[str, ...] = tuple(allowed_switch_versions or ())
         self.allowed_ap_versions: Tuple[str, ...] = tuple(allowed_ap_versions or ())
+        self.allowed_switch_versions_by_model: Dict[str, Tuple[str, ...]] = {}
+        self.allowed_ap_versions_by_model: Dict[str, Tuple[str, ...]] = {}
         self._allowed_switch_set: Set[str] = set()
         self._allowed_ap_set: Set[str] = set()
         self._refresh_allowed_versions()
 
     def _refresh_allowed_versions(self) -> None:
         if self._dynamic_switch_versions:
+            self.allowed_switch_versions_by_model = _load_allowed_versions_by_model_from_standard_doc("switch")
             self.allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
         if self._dynamic_ap_versions:
+            self.allowed_ap_versions_by_model = _load_allowed_versions_by_model_from_standard_doc("ap")
             self.allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
         self._allowed_switch_set = {value for value in self.allowed_switch_versions}
         self._allowed_ap_set = {value for value in self.allowed_ap_versions}
@@ -2021,17 +2051,25 @@ class FirmwareManagementCheck(ComplianceCheck):
             device_type: Optional[str] = None
             allowed_versions: Tuple[str, ...]
             allowed_set: Set[str]
+            allowed_by_model: Dict[str, Tuple[str, ...]]
 
             if self.allowed_switch_versions and _is_switch(device_dict):
                 device_type = "Switch"
                 allowed_versions = self.allowed_switch_versions
                 allowed_set = self._allowed_switch_set
+                allowed_by_model = self.allowed_switch_versions_by_model
             elif self.allowed_ap_versions and _is_access_point(device_dict):
                 device_type = "Access point"
                 allowed_versions = self.allowed_ap_versions
                 allowed_set = self._allowed_ap_set
+                allowed_by_model = self.allowed_ap_versions_by_model
             else:
                 continue
+
+            device_model = _normalize_device_model(device_dict.get("model"))
+            if device_model and device_model in allowed_by_model:
+                allowed_versions = allowed_by_model[device_model]
+                allowed_set = set(allowed_versions)
 
             version = _extract_firmware_version(device_dict) or ""
             is_allowed = bool(version) and version in allowed_set
