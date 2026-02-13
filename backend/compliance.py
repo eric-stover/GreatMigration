@@ -258,9 +258,22 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     )
     resp.raise_for_status()
     payload = resp.json()
-    if not isinstance(payload, list):
-        return []
-    return [row for row in payload if isinstance(row, dict)]
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    return [row for row in rows if isinstance(row, dict)]
 
 
 
@@ -304,9 +317,15 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
         by_model: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
             tags = row.get("tags")
+            if isinstance(tags, list):
+                normalized_tags = {str(tag).strip() for tag in tags if str(tag).strip()}
+            elif isinstance(tags, str):
+                normalized_tags = {part.strip() for part in tags.split(",") if part.strip()}
+            else:
+                normalized_tags = set()
             model = row.get("model")
             version = row.get("version")
-            if not isinstance(tags, list) or SUGGESTED_FIRMWARE_TAG not in tags:
+            if SUGGESTED_FIRMWARE_TAG not in normalized_tags:
                 continue
             if not isinstance(model, str) or not model.strip() or not isinstance(version, str) or not version.strip():
                 continue
@@ -1937,14 +1956,24 @@ class FirmwareManagementCheck(ComplianceCheck):
         allowed_switch_versions: Optional[Sequence[str]] = None,
         allowed_ap_versions: Optional[Sequence[str]] = None,
     ) -> None:
-        if allowed_switch_versions is None:
-            allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
-        if allowed_ap_versions is None:
-            allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
+        self._dynamic_switch_versions = allowed_switch_versions is None
+        self._dynamic_ap_versions = allowed_ap_versions is None
         self.allowed_switch_versions: Tuple[str, ...] = tuple(allowed_switch_versions or ())
         self.allowed_ap_versions: Tuple[str, ...] = tuple(allowed_ap_versions or ())
+        self._allowed_switch_set: Set[str] = set()
+        self._allowed_ap_set: Set[str] = set()
+        self._refresh_allowed_versions()
+
+    def _refresh_allowed_versions(self) -> None:
+        if self._dynamic_switch_versions:
+            self.allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
+        if self._dynamic_ap_versions:
+            self.allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
         self._allowed_switch_set = {value for value in self.allowed_switch_versions}
         self._allowed_ap_set = {value for value in self.allowed_ap_versions}
+
+    def prepare_run(self) -> None:
+        self._refresh_allowed_versions()
 
     def run(self, context: SiteContext) -> List[Finding]:
         if not self.allowed_switch_versions and not self.allowed_ap_versions:
