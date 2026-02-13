@@ -465,6 +465,56 @@ def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
 
 
+
+
+def test_refresh_standards_accepts_paginated_payload(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(_device_type):
+        return [
+            {"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"], "record_id": "1"},
+        ]
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
+
+
+def test_fetch_versions_for_type_accepts_dict_payload(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-id")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]}
+
+    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
+
+    rows = compliance._fetch_versions_for_type("switch")
+    assert rows == [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
+
+
+def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(_device_type):
+        return [{"model": "AP32", "version": "0.12.27452", "tags": "beta,junos_suggested"}]
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["AP32"][0]["version"] == "0.12.27452"
+
 def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

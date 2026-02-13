@@ -258,9 +258,22 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     )
     resp.raise_for_status()
     payload = resp.json()
-    if not isinstance(payload, list):
-        return []
-    return [row for row in payload if isinstance(row, dict)]
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    return [row for row in rows if isinstance(row, dict)]
 
 
 
@@ -304,9 +317,15 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
         by_model: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
             tags = row.get("tags")
+            if isinstance(tags, list):
+                normalized_tags = {str(tag).strip() for tag in tags if str(tag).strip()}
+            elif isinstance(tags, str):
+                normalized_tags = {part.strip() for part in tags.split(",") if part.strip()}
+            else:
+                normalized_tags = set()
             model = row.get("model")
             version = row.get("version")
-            if not isinstance(tags, list) or SUGGESTED_FIRMWARE_TAG not in tags:
+            if SUGGESTED_FIRMWARE_TAG not in normalized_tags:
                 continue
             if not isinstance(model, str) or not model.strip() or not isinstance(version, str) or not version.strip():
                 continue
