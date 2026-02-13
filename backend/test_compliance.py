@@ -561,6 +561,68 @@ def test_fetch_versions_for_type_uses_cached_org_id(monkeypatch):
     assert any("/orgs/cached-org/devices/versions" in call for call in calls)
 
 
+def test_fetch_versions_for_type_ap_falls_back_to_site_catalog(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-id")
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def _fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith('/orgs/org-id/devices/versions'):
+            return _Resp([])
+        if url.endswith('/orgs/org-id/sites'):
+            return _Resp([{"id": "site-1"}, {"id": "site-2"}])
+        if url.endswith('/sites/site-1/devices/versions'):
+            return _Resp([
+                {"model": "AP32", "version": "0.12.27452", "record_id": 11, "tags": ["junos_suggested"]}
+            ])
+        if url.endswith('/sites/site-2/devices/versions'):
+            return _Resp([
+                {"model": "AP32", "version": "0.12.27452", "record_id": 11, "tags": ["junos_suggested"]},
+                {"model": "AP45", "version": "0.13.30000", "record_id": 22, "tags": ["junos_suggested"]},
+            ])
+        raise AssertionError(f'unexpected url {url}')
+
+    monkeypatch.setattr(compliance.requests, "get", _fake_get)
+
+    rows = compliance._fetch_versions_for_type("ap")
+
+    assert {row["model"] for row in rows} == {"AP32", "AP45"}
+    assert any(call.endswith('/orgs/org-id/sites') for call in calls)
+    assert any(call.endswith('/sites/site-1/devices/versions') for call in calls)
+    assert any(call.endswith('/sites/site-2/devices/versions') for call in calls)
+
+
+def test_fetch_versions_for_type_ap_without_fallback_for_non_ap(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-id")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
+
+    rows = compliance._fetch_versions_for_type("switch")
+
+    assert rows == []
+
+
+
 def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
@@ -573,7 +635,7 @@ def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
     compliance._refresh_firmware_standards_if_needed(standards_path)
 
     written = json.loads(standards_path.read_text(encoding="utf-8"))
-    assert written["models"]["switch"]["AP32"][0]["version"] == "0.12.27452"
+    assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
 
 def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
@@ -729,6 +791,49 @@ def test_firmware_management_check_uses_model_specific_versions(monkeypatch, tmp
 
     assert len(findings) == 1
     assert findings[0].details["allowed_versions"] == ["22.2R1"]
+
+
+def test_firmware_management_check_uses_ap_model_specific_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standards.json"
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2025-01-01T00:00:00Z",
+                "sources": {},
+                "models": {
+                    "switch": {},
+                    "ap": {
+                        "AP32": [{"version": "0.12.27452"}],
+                        "AP45": [{"version": "0.13.30000"}],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    ctx = SiteContext(
+        site_id="site-fw-ap-model",
+        site_name="Firmware AP Model",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "ap-model-1",
+                "name": "AP Model 1",
+                "type": "ap",
+                "model": "AP45",
+                "version": "0.12.27452",
+            }
+        ],
+    )
+
+    findings = FirmwareManagementCheck().run(ctx)
+
+    assert len(findings) == 1
+    assert findings[0].details["allowed_versions"] == ["0.13.30000"]
 
 
 def test_firmware_management_check_normalizes_model_lookup(monkeypatch, tmp_path):

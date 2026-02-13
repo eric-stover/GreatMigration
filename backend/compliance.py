@@ -298,6 +298,76 @@ def _resolve_mist_org_id(token: str, base_url: str) -> Optional[str]:
     return _MIST_ORG_ID_CACHE
 
 
+def _fetch_org_site_ids(token: str, base_url: str, org_id: str) -> List[str]:
+    url = f"{base_url}/orgs/{org_id}/sites"
+    logger.info("action=mist_sites_discovery url=%s", url)
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    site_ids: List[str] = []
+    seen: Set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        raw_site_id = row.get("id")
+        if not isinstance(raw_site_id, str):
+            continue
+        site_id = raw_site_id.strip()
+        if not site_id or site_id in seen:
+            continue
+        seen.add(site_id)
+        site_ids.append(site_id)
+    return site_ids
+
+
+def _fetch_site_versions_for_type(token: str, base_url: str, site_id: str, device_type: str) -> List[Dict[str, Any]]:
+    url = f"{base_url}/sites/{site_id}/devices/versions"
+    logger.info("action=firmware_versions_request scope=site type=%s site_id=%s url=%s", device_type, site_id, url)
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"type": device_type},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     token = (os.getenv("MIST_TOKEN") or "").strip()
     base = _mist_api_base_url()
@@ -335,7 +405,34 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     else:
         rows = []
 
-    return [row for row in rows if isinstance(row, dict)]
+    filtered_rows = [row for row in rows if isinstance(row, dict)]
+    if filtered_rows or device_type != "ap":
+        return filtered_rows
+
+    # AP version catalogs are sometimes empty at the org endpoint; fallback to site-level catalogs.
+    try:
+        site_ids = _fetch_org_site_ids(token, base, org_id)
+    except requests.RequestException:
+        return filtered_rows
+
+    merged_rows: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, Any, Any]] = set()
+    for site_id in site_ids:
+        try:
+            site_rows = _fetch_site_versions_for_type(token, base, site_id, device_type)
+        except requests.RequestException:
+            continue
+        for row in site_rows:
+            key = (
+                str(row.get("model") or "").strip(),
+                row.get("version"),
+                row.get("record_id"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_rows.append(row)
+    return merged_rows
 
 
 
@@ -400,8 +497,9 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
 
         if by_model:
             models[device_type] = by_model
+            resolved_org_id = _resolve_mist_org_id((os.getenv("MIST_TOKEN") or "").strip(), _mist_api_base_url()) or ""
             sources[device_type] = {
-                "endpoint": f"/orgs/{(os.getenv('MIST_ORG_ID') or '').strip()}/devices/versions?type={device_type}",
+                "endpoint": f"/orgs/{resolved_org_id}/devices/versions?type={device_type}",
                 "tag_filter": SUGGESTED_FIRMWARE_TAG,
                 "updated_at": _utc_now().isoformat().replace("+00:00", "Z"),
             }
