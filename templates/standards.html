@@ -111,7 +111,7 @@
       body.innerHTML = '';
       visibleRows.forEach((row) => {
         const tr = document.createElement('tr');
-        tr.className = 'odd:bg-white even:bg-slate-50 dark:odd:bg-slate-800 dark:even:bg-slate-850';
+        tr.className = 'odd:bg-white even:bg-slate-50 dark:odd:bg-slate-800 dark:even:bg-slate-700';
         const cells = [row.model, row.device_type, ...(row.standards || [])];
         cells.forEach((value, idx) => {
           const td = document.createElement('td');
