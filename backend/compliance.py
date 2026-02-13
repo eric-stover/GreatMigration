@@ -15,6 +15,7 @@ from audit_actions import (
     CLEAR_DNS_OVERRIDE_ACTION_ID,
     ENABLE_CLOUD_MANAGEMENT_ACTION_ID,
     SET_SITE_VARIABLES_ACTION_ID,
+    SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
 
 
@@ -853,6 +854,7 @@ IGNORED_CONFIG_KEYS: Set[str] = {
 ALLOWED_ADDITIONAL_CONFIG_KEYS: Set[str] = {"image1_url", "image2_url", "image3_url"}
 
 WAN_ROLE_KEYWORDS: Tuple[str, ...] = ("wan",)
+WAN_ALLOWED_UPLINK_SUFFIXES: Tuple[str, ...] = ("0/0/0", "0/0/4", "0/0/8", "0/0/12", "0/0/16")
 WAN_ALLOWED_CONFIG_PATH_PREFIXES: Tuple[str, ...] = (
     "mgmt_ip_config",
     "mgmt_port_config",
@@ -992,16 +994,62 @@ def _evaluate_wan_oob_ip_config(actual: Any) -> List[Dict[str, Any]]:
         )
 
     use_mgmt_host_out = actual.get("use_mgmt_vrf_for_host_out")
-    if use_mgmt_host_out is not False:
+    if use_mgmt_host_out is not True:
         diffs.append(
             _make_diff(
                 "oob_ip_config.use_mgmt_vrf_for_host_out",
-                False,
+                True,
                 use_mgmt_host_out,
             )
         )
 
     return diffs
+
+
+def _evaluate_wan_active_ports(if_stat: Any) -> List[Dict[str, Any]]:
+    diffs: List[Dict[str, Any]] = []
+    if if_stat is None:
+        return diffs
+    if not isinstance(if_stat, dict):
+        return [
+            {
+                "path": "if_stat",
+                "expected": "dictionary of interface stats",
+                "actual": if_stat,
+            }
+        ]
+
+    allowed_suffixes = set(WAN_ALLOWED_UPLINK_SUFFIXES)
+    unexpected_ports: Set[str] = set()
+    for key, value in if_stat.items():
+        if not isinstance(value, dict):
+            continue
+        if not value.get("up"):
+            continue
+        port_id_value = value.get("port_id")
+        if isinstance(port_id_value, str) and port_id_value.strip():
+            port_id = port_id_value.strip()
+        elif isinstance(key, str):
+            port_id = key.split(".", 1)[0].strip()
+        else:
+            continue
+        match = re.search(r"(\d+/\d+/\d+)$", port_id)
+        if match is None:
+            continue
+        if match.group(1) not in allowed_suffixes:
+            unexpected_ports.add(port_id)
+
+    if unexpected_ports:
+        diffs.append(
+            {
+                "path": "if_stat",
+                "expected": f"only allowed WAN ports can be up ({', '.join(WAN_ALLOWED_UPLINK_SUFFIXES)})",
+                "actual": sorted(unexpected_ports),
+            }
+        )
+    return diffs
+
+
 def _role_scoped_switch_configs(
     role: Any,
     template_config: Dict[str, Any],
@@ -1288,6 +1336,7 @@ class ConfigurationOverridesCheck(ComplianceCheck):
 
             ip_config_diffs: List[Dict[str, Any]] = []
             wan_oob_diffs: List[Dict[str, Any]] = []
+            wan_active_port_diffs: List[Dict[str, Any]] = []
             if expected_config_raw or actual_config_source:
                 ip_config_diffs = _evaluate_ip_config(
                     expected_ip_config if expected_config_raw else None,
@@ -1295,6 +1344,7 @@ class ConfigurationOverridesCheck(ComplianceCheck):
                 )
             if is_wan_role:
                 wan_oob_diffs = _evaluate_wan_oob_ip_config(actual_oob_config)
+                wan_active_port_diffs = _evaluate_wan_active_ports(device.get("if_stat"))
                 ip_config_diffs = []
 
             standard_device_diffs = _collect_standard_device_issues(device)
@@ -1309,6 +1359,8 @@ class ConfigurationOverridesCheck(ComplianceCheck):
 
             if wan_oob_diffs:
                 combined_diffs.extend(wan_oob_diffs)
+            if wan_active_port_diffs:
+                combined_diffs.extend(wan_active_port_diffs)
 
             if combined_diffs:
                 filtered_diffs: List[Dict[str, Any]] = []
@@ -1870,6 +1922,33 @@ class SpareSwitchPresenceCheck(ComplianceCheck):
                 spare_count += 1
 
         if spare_count == 0:
+            candidate_switches = []
+            for device in switches:
+                device_id = device.get("id")
+                if device_id is None:
+                    continue
+                name = _normalize_site_name(device) or str(device_id)
+                candidate_switches.append(
+                    {
+                        "device_id": str(device_id),
+                        "device_name": name,
+                    }
+                )
+            actions: Optional[List[Dict[str, Any]]] = None
+            if candidate_switches:
+                actions = [
+                    {
+                        "id": SET_SPARE_SWITCH_ROLE_ACTION_ID,
+                        "label": "Assign spare switch role",
+                        "button_label": "1 Click Fix Now",
+                        "site_ids": [context.site_id],
+                        "metadata": {
+                            "site_name": context.site_name,
+                            "switch_options": candidate_switches,
+                            "require_switch_selection": True,
+                        },
+                    }
+                ]
             findings.append(
                 Finding(
                     site_id=context.site_id,
@@ -1879,6 +1958,7 @@ class SpareSwitchPresenceCheck(ComplianceCheck):
                         "total_switches": len(switches),
                         "spare_switches": spare_count,
                     },
+                    actions=actions,
                 )
             )
 

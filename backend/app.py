@@ -792,6 +792,15 @@ def _fetch_site_context(base_url: str, headers: Dict[str, str], site_id: str) ->
     _ingest_devices(base_devices_doc)
     _ingest_devices(switch_devices_doc)
 
+    switch_device_ids: Set[str] = set()
+    if isinstance(switch_devices_doc, list):
+        for item in switch_devices_doc:
+            if not isinstance(item, dict):
+                continue
+            switch_id = item.get("id")
+            if isinstance(switch_id, str) and switch_id.strip():
+                switch_device_ids.add(switch_id.strip())
+
     def _normalize_mac(value: Any) -> str:
         if value is None:
             return ""
@@ -873,6 +882,15 @@ def _fetch_site_context(base_url: str, headers: Dict[str, str], site_id: str) ->
         stats_doc = _claim_stats(merged)
         if stats_doc:
             merged.update({k: v for k, v in stats_doc.items() if v is not None})
+        if device_id in switch_device_ids:
+            switch_stats_detail = _mist_get_json(
+                base_url,
+                headers,
+                f"/sites/{site_id}/stats/devices/{device_id}?type=switch",
+                optional=True,
+            )
+            if isinstance(switch_stats_detail, dict):
+                merged.update({k: v for k, v in switch_stats_detail.items() if v is not None})
         device_list.append(merged)
 
     device_list.extend(anonymous_devices)

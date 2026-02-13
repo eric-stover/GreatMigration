@@ -6,6 +6,7 @@ from audit_actions import (
     CLEAR_DNS_OVERRIDE_ACTION_ID,
     ENABLE_CLOUD_MANAGEMENT_ACTION_ID,
     SET_SITE_VARIABLES_ACTION_ID,
+    SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
 from audit_fixes import execute_audit_action
 
@@ -626,3 +627,153 @@ def test_execute_dns_override_action_checks_preconditions(monkeypatch):
     site_summary = result["results"][0]
     assert site_summary["failed"] >= 1
     assert site_summary["errors"], "Expected error details when template missing"
+
+
+def test_execute_action_sets_spare_switch_role_and_name(monkeypatch):
+    calls = {"get": [], "put": []}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls["get"].append((url, params))
+        if url.endswith("/sites/site-1"):
+            return DummyResponse({"name": "Site One"})
+        if url.endswith("/sites/site-1/devices/sw-1"):
+            return DummyResponse({"id": "sw-1", "type": "switch", "name": "NAABCIDF1XX1", "role": "access"})
+        if url.endswith("/sites/site-1/stats/devices/sw-1"):
+            assert params == {"type": "switch"}
+            return DummyResponse({"stats": {"ports": [{"name": "ge-0/0/1", "status": "down"}]}})
+        raise AssertionError(f"Unexpected GET {url}")
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        calls["put"].append((url, json))
+        return DummyResponse({})
+
+    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
+    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
+
+    result = execute_audit_action(
+        SET_SPARE_SWITCH_ROLE_ACTION_ID,
+        "https://api.mist.test/api/v1",
+        "token",
+        ["site-1"],
+        dry_run=False,
+        metadata={"selected_switch_id": "sw-1"},
+    )
+
+    assert result["ok"] is True
+    summary = result["results"][0]
+    assert summary["updated"] == 1
+    assert summary["failed"] == 0
+    assert summary["changes"][0]["status"] == "success"
+    assert len(calls["put"]) == 2
+    assert calls["put"][0][0].endswith("/sites/site-1/devices/sw-1")
+    assert calls["put"][0][1] == {"port_config": {}}
+    assert calls["put"][1][1] == {"role": "spare", "name": "NAABCMDFSPARE"}
+
+
+def test_execute_action_blocks_spare_switch_in_use(monkeypatch):
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/sites/site-1"):
+            return DummyResponse({"name": "Site One"})
+        if url.endswith("/sites/site-1/devices/sw-1"):
+            return DummyResponse({"id": "sw-1", "type": "switch", "name": "NAABCIDF1AS1", "role": "access"})
+        if url.endswith("/sites/site-1/stats/devices/sw-1"):
+            assert params == {"type": "switch"}
+            return DummyResponse({"stats": {"interfaces": [{"name": "xe-0/0/2", "up": True}]}})
+        raise AssertionError(f"Unexpected GET {url}")
+
+    put_calls = []
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        put_calls.append((url, json))
+        return DummyResponse({})
+
+    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
+    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
+
+    result = execute_audit_action(
+        SET_SPARE_SWITCH_ROLE_ACTION_ID,
+        "https://api.mist.test/api/v1",
+        "token",
+        ["site-1"],
+        dry_run=False,
+        metadata={"selected_switch_id": "sw-1"},
+    )
+
+    summary = result["results"][0]
+    assert summary["updated"] == 0
+    assert summary["failed"] == 1
+    assert "Devices are currently connected" in summary["errors"][0]["reason"]
+    assert put_calls == []
+
+
+def test_execute_action_normalizes_spare_switch_name(monkeypatch):
+    calls = {"put": []}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/sites/site-1"):
+            return DummyResponse({"name": "Site One"})
+        if url.endswith("/sites/site-1/devices/sw-1"):
+            return DummyResponse({"id": "sw-1", "type": "switch", "name": "NAWHPMDF_SPARE", "role": "access"})
+        if url.endswith("/sites/site-1/stats/devices/sw-1"):
+            assert params == {"type": "switch"}
+            return DummyResponse({"stats": {"ports": [{"name": "ge-0/0/1", "status": "down"}]}})
+        raise AssertionError(f"Unexpected GET {url}")
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        calls["put"].append((url, json))
+        return DummyResponse({})
+
+    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
+    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
+
+    result = execute_audit_action(
+        SET_SPARE_SWITCH_ROLE_ACTION_ID,
+        "https://api.mist.test/api/v1",
+        "token",
+        ["site-1"],
+        dry_run=False,
+        metadata={"selected_switch_id": "sw-1"},
+    )
+
+    assert result["ok"] is True
+    summary = result["results"][0]
+    assert summary["updated"] == 1
+    assert summary["failed"] == 0
+    assert len(calls["put"]) == 2
+    assert calls["put"][1][1] == {"role": "spare", "name": "NAWHPMDFSPARE"}
+
+
+def test_execute_action_allows_active_uplink_pic_interfaces(monkeypatch):
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/sites/site-1"):
+            return DummyResponse({"name": "Site One"})
+        if url.endswith("/sites/site-1/devices/sw-1"):
+            return DummyResponse({"id": "sw-1", "type": "switch", "name": "NAABCIDF1AS1", "role": "access"})
+        if url.endswith("/sites/site-1/stats/devices/sw-1"):
+            assert params == {"type": "switch"}
+            return DummyResponse({"stats": {"interfaces": [{"name": "xe-0/1/2", "up": True}]}})
+        raise AssertionError(f"Unexpected GET {url}")
+
+    put_calls = []
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        put_calls.append((url, json))
+        return DummyResponse({})
+
+    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
+    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
+
+    result = execute_audit_action(
+        SET_SPARE_SWITCH_ROLE_ACTION_ID,
+        "https://api.mist.test/api/v1",
+        "token",
+        ["site-1"],
+        dry_run=False,
+        metadata={"selected_switch_id": "sw-1"},
+    )
+
+    summary = result["results"][0]
+    assert summary["updated"] == 1
+    assert summary["failed"] == 0
+    assert summary["changes"][0]["status"] == "success"
+    assert len(put_calls) == 2

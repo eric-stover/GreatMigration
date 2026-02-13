@@ -13,6 +13,7 @@ from audit_actions import (
     CLEAR_DNS_OVERRIDE_ACTION_ID,
     ENABLE_CLOUD_MANAGEMENT_ACTION_ID,
     SET_SITE_VARIABLES_ACTION_ID,
+    SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
 from compliance import (
     DEFAULT_AP_NAME_PATTERN,
@@ -36,6 +37,9 @@ else:
 
 SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
     r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)[A-Z]{2}\d+$"
+)
+SPARE_SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
+    r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)SPARE$"
 )
 
 
@@ -142,9 +146,10 @@ def _get_json(
     path: str,
     *,
     optional: bool = False,
+    params: Optional[Dict[str, Any]] = None,
 ) -> Any:
     url = f"{base_url}{path}"
-    response = requests.get(url, headers=headers, timeout=30)
+    response = requests.get(url, headers=headers, params=params or None, timeout=30)
     if optional and response.status_code == 404:
         return {}
     response.raise_for_status()
@@ -425,6 +430,251 @@ def _update_device_payload(
         timeout=30,
     )
     response.raise_for_status()
+
+
+PHYSICAL_SWITCH_INTERFACE_PATTERN = re.compile(
+    r"^(?:ge|xe|et|mge)-(?P<fpc>\d+)/(?P<pic>\d+)/(?P<port>\d+)(?:\.\d+)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_truthy_link_state(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        return normalized in {"up", "connected", "online", "active"}
+    return False
+
+
+def _interface_name_from_entry(entry: Mapping[str, Any]) -> str:
+    for key in ("name", "port_name", "port", "port_id", "interface", "if_name", "id"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _interface_up_from_entry(entry: Mapping[str, Any]) -> bool:
+    for key in ("up", "oper_up", "link_up", "is_up", "connected"):
+        if key in entry and _is_truthy_link_state(entry.get(key)):
+            return True
+    status = entry.get("status")
+    if _is_truthy_link_state(status):
+        return True
+    return False
+
+
+def _has_active_physical_switch_ports(value: Any, visited: Optional[Set[int]] = None) -> bool:
+    if visited is None:
+        visited = set()
+    obj_id = id(value)
+    if obj_id in visited:
+        return False
+    visited.add(obj_id)
+
+    if isinstance(value, Mapping):
+        interface_name = _interface_name_from_entry(value)
+        if interface_name:
+            match = PHYSICAL_SWITCH_INTERFACE_PATTERN.match(interface_name)
+            if match and match.group("pic") == "0" and _interface_up_from_entry(value):
+                return True
+        for nested in value.values():
+            if _has_active_physical_switch_ports(nested, visited):
+                return True
+    elif isinstance(value, (list, tuple, set)):
+        for nested in value:
+            if _has_active_physical_switch_ports(nested, visited):
+                return True
+    return False
+
+
+def _propose_spare_switch_name(current_name: str) -> Optional[str]:
+    raw_name = (current_name or "").strip()
+    normalized_name = re.sub(r"[^A-Za-z0-9]", "", raw_name).upper()
+
+    match = SWITCH_LOCATION_EXTRACT_PATTERN.match(raw_name)
+    if not match:
+        match = SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
+    if not match:
+        match = SPARE_SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
+    if not match:
+        return None
+    candidate = f"{match.group('region')}{match.group('site')}MDFSPARE"
+    if SWITCH_LLDPNAME_PATTERN and SWITCH_LLDPNAME_PATTERN.fullmatch(candidate) is None:
+        return None
+    return candidate
+
+
+def _execute_set_spare_switch_role_action(
+    base_url: str,
+    token: str,
+    site_ids: Sequence[str],
+    *,
+    dry_run: bool,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    headers = _mist_headers(token)
+    normalized_site_ids = [sid for sid in site_ids if isinstance(sid, str) and sid]
+
+    target_switch_id = ""
+    if isinstance(metadata, Mapping):
+        raw = metadata.get("selected_switch_id")
+        if raw is not None:
+            target_switch_id = str(raw).strip()
+
+    if not target_switch_id:
+        raise ValueError("Select a switch before running the spare-switch fix.")
+
+    results: List[Dict[str, Any]] = []
+    totals = {"updated": 0, "skipped": 0, "failed": 0}
+
+    for site_id in normalized_site_ids:
+        site_name = _fetch_site_name(base_url, headers, site_id)
+        summary: Dict[str, Any] = {
+            "site_id": site_id,
+            "site_name": site_name,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "changes": [],
+            "errors": [],
+        }
+
+        try:
+            device_doc = _fetch_device_document(base_url, headers, site_id, target_switch_id)
+        except requests.HTTPError as exc:
+            summary["failed"] += 1
+            summary["errors"].append({"device_id": target_switch_id, "reason": f"Device lookup failed: {exc}"})
+            results.append(summary)
+            totals["failed"] += 1
+            continue
+
+        device_type = str(device_doc.get("type") or "").strip().lower()
+        device_name = _device_display_name(device_doc, target_switch_id)
+        if device_type != "switch":
+            summary["failed"] += 1
+            summary["errors"].append({"device_id": target_switch_id, "reason": "Selected device is not a switch."})
+            results.append(summary)
+            totals["failed"] += 1
+            continue
+
+        stats_doc = _get_json(
+            base_url,
+            headers,
+            f"/sites/{site_id}/stats/devices/{target_switch_id}",
+            optional=True,
+            params={"type": "switch"},
+        )
+        if _has_active_physical_switch_ports(stats_doc):
+            summary["failed"] += 1
+            summary["errors"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "reason": "Devices are currently connected to the spare switch and should be moved to the MDF access layer first",
+                }
+            )
+            summary["changes"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "status": "failed",
+                    "reason": "Devices are currently connected to the spare switch and should be moved to the MDF access layer first",
+                }
+            )
+            results.append(summary)
+            totals["failed"] += 1
+            continue
+
+        current_name = str(device_doc.get("name") or "").strip()
+        role_payload = {"role": "spare"}
+
+        proposed_spare_name = _propose_spare_switch_name(current_name)
+        if not proposed_spare_name:
+            summary["failed"] += 1
+            summary["errors"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "reason": "Unable to derive a compliant spare-switch name from the current device name.",
+                }
+            )
+            summary["changes"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "status": "failed",
+                    "reason": "Unable to derive a compliant spare-switch name from the current device name.",
+                }
+            )
+            results.append(summary)
+            totals["failed"] += 1
+            continue
+
+        rename_to: Optional[str] = None
+        if current_name != proposed_spare_name:
+            rename_to = proposed_spare_name
+
+        payload = dict(role_payload)
+        if rename_to:
+            payload["name"] = rename_to
+
+        change_entry: Dict[str, Any] = {
+            "device_id": target_switch_id,
+            "device_name": device_name,
+            "previous_role": device_doc.get("role"),
+            "new_role": "spare",
+        }
+        if rename_to:
+            change_entry["previous_name"] = current_name
+            change_entry["new_name"] = rename_to
+
+        if dry_run:
+            change_entry["status"] = "preview"
+            change_entry["message"] = "Would clear port config, assign spare role, and enforce switch naming convention."
+            summary["updated"] += 1
+        else:
+            try:
+                _update_device_payload(base_url, headers, site_id, target_switch_id, {"port_config": {}})
+                _update_device_payload(base_url, headers, site_id, target_switch_id, payload)
+            except requests.HTTPError as exc:
+                summary["failed"] += 1
+                summary["errors"].append(
+                    {
+                        "device_id": target_switch_id,
+                        "device_name": device_name,
+                        "reason": f"Failed to update switch role/name: {exc}",
+                    }
+                )
+                change_entry["status"] = "failed"
+                change_entry["reason"] = "Failed to update switch role/name."
+            else:
+                change_entry["status"] = "success"
+                change_entry["message"] = "Cleared port config and assigned spare switch role."
+                summary["updated"] += 1
+
+        summary["changes"].append(change_entry)
+        results.append(summary)
+        totals["updated"] += summary.get("updated", 0)
+        totals["skipped"] += summary.get("skipped", 0)
+        totals["failed"] += summary.get("failed", 0)
+
+    totals_with_sites = {**totals, "sites": len(results)}
+    totals_with_sites.setdefault(
+        "summary",
+        _format_summary_message("Updated spare switch configuration for", totals_with_sites.get("updated", 0)),
+    )
+
+    return {
+        "ok": True,
+        "action_id": SET_SPARE_SWITCH_ROLE_ACTION_ID,
+        "dry_run": dry_run,
+        "results": results,
+        "totals": totals_with_sites,
+    }
 
 
 def _parse_switch_location(name: str) -> Optional[Tuple[str, str, str]]:
@@ -1372,6 +1622,14 @@ def execute_audit_action(
             site_ids,
             dry_run=dry_run,
             device_map=device_map,
+        )
+    if action_id == SET_SPARE_SWITCH_ROLE_ACTION_ID:
+        return _execute_set_spare_switch_role_action(
+            base_url,
+            token,
+            site_ids,
+            dry_run=dry_run,
+            metadata=metadata,
         )
     raise ValueError(f"Unsupported action_id: {action_id}")
 
