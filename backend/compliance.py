@@ -1937,14 +1937,24 @@ class FirmwareManagementCheck(ComplianceCheck):
         allowed_switch_versions: Optional[Sequence[str]] = None,
         allowed_ap_versions: Optional[Sequence[str]] = None,
     ) -> None:
-        if allowed_switch_versions is None:
-            allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
-        if allowed_ap_versions is None:
-            allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
+        self._dynamic_switch_versions = allowed_switch_versions is None
+        self._dynamic_ap_versions = allowed_ap_versions is None
         self.allowed_switch_versions: Tuple[str, ...] = tuple(allowed_switch_versions or ())
         self.allowed_ap_versions: Tuple[str, ...] = tuple(allowed_ap_versions or ())
+        self._allowed_switch_set: Set[str] = set()
+        self._allowed_ap_set: Set[str] = set()
+        self._refresh_allowed_versions()
+
+    def _refresh_allowed_versions(self) -> None:
+        if self._dynamic_switch_versions:
+            self.allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
+        if self._dynamic_ap_versions:
+            self.allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
         self._allowed_switch_set = {value for value in self.allowed_switch_versions}
         self._allowed_ap_set = {value for value in self.allowed_ap_versions}
+
+    def prepare_run(self) -> None:
+        self._refresh_allowed_versions()
 
     def run(self, context: SiteContext) -> List[Finding]:
         if not self.allowed_switch_versions and not self.allowed_ap_versions:
