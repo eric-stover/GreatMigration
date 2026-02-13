@@ -492,6 +492,41 @@ def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
     versions = compliance._load_allowed_versions_from_standard_doc("switch")
     assert versions == ("20.4R3-S4",)
 
+
+def test_refresh_preserves_existing_device_type_when_fetch_empty(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    stale = "2023-01-01T00:00:00Z"
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": stale,
+                "sources": {},
+                "models": {
+                    "switch": {"EX2300": [{"version": "20.4R3-S4"}]},
+                    "ap": {"AP32": [{"version": "0.12.10000"}]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S5", "tags": ["junos_suggested"], "record_id": "1"}]
+        if device_type == "ap":
+            return []
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S5"
+    assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.10000"
+
 def test_firmware_management_check_flags_unapproved_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standards.json"
     _write_standard_versions(standards_path, switch_versions=["20.4R3-S4", "22.1R1"], ap_versions=["16.0.2"])

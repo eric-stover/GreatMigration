@@ -315,13 +315,14 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
                 continue
             bucket.append({"version": version.strip(), "record_id": row.get("record_id")})
 
-        models[device_type] = by_model
-        sources[device_type] = {
-            "endpoint": f"/orgs/{(os.getenv('MIST_ORG_ID') or '').strip()}/devices/versions?type={device_type}",
-            "tag_filter": SUGGESTED_FIRMWARE_TAG,
-            "updated_at": _utc_now().isoformat().replace("+00:00", "Z"),
-        }
-        any_changes = any_changes or bool(by_model)
+        if by_model:
+            models[device_type] = by_model
+            sources[device_type] = {
+                "endpoint": f"/orgs/{(os.getenv('MIST_ORG_ID') or '').strip()}/devices/versions?type={device_type}",
+                "tag_filter": SUGGESTED_FIRMWARE_TAG,
+                "updated_at": _utc_now().isoformat().replace("+00:00", "Z"),
+            }
+            any_changes = True
 
     if any_changes:
         _save_firmware_standards_doc(updated, path)
