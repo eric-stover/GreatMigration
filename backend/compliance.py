@@ -456,6 +456,30 @@ def _standards_doc_has_versions(doc: Mapping[str, Any]) -> bool:
                     return True
     return False
 
+
+def _row_matches_standard_firmware_filter(row: Mapping[str, Any], device_type: str) -> bool:
+    if device_type == "ap":
+        tag = row.get("tag")
+        return isinstance(tag, str) and tag.strip().lower() == "alpha"
+
+    tags = row.get("tags")
+    normalized_tags: Set[str] = set()
+    if isinstance(tags, list):
+        normalized_tags = {str(tag).strip().lower() for tag in tags if str(tag).strip()}
+    elif isinstance(tags, str):
+        normalized_tags = {part.strip().lower() for part in tags.split(",") if part.strip()}
+
+    return SUGGESTED_FIRMWARE_TAG.lower() in normalized_tags
+
+
+def _sanitize_standard_firmware_entry(row: Mapping[str, Any]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    for key, value in row.items():
+        if key == "_version":
+            continue
+        sanitized[key] = value
+    return sanitized
+
 def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[str, Any]:
     path = path or _firmware_standards_path()
     logger.info("action=firmware_standards_refresh path=%s", path)
@@ -477,30 +501,26 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
             continue
         by_model: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
-            tags = row.get("tags")
-            if isinstance(tags, list):
-                normalized_tags = {str(tag).strip() for tag in tags if str(tag).strip()}
-            elif isinstance(tags, str):
-                normalized_tags = {part.strip() for part in tags.split(",") if part.strip()}
-            else:
-                normalized_tags = set()
             model = row.get("model")
             version = row.get("version")
-            if SUGGESTED_FIRMWARE_TAG not in normalized_tags:
-                continue
             if not isinstance(model, str) or not model.strip() or not isinstance(version, str) or not version.strip():
                 continue
+            if not _row_matches_standard_firmware_filter(row, device_type):
+                continue
+
+            entry = _sanitize_standard_firmware_entry(row)
+            entry["version"] = version.strip()
             bucket = by_model.setdefault(model.strip(), [])
             if any(existing.get("version") == version for existing in bucket):
                 continue
-            bucket.append({"version": version.strip(), "record_id": row.get("record_id")})
+            bucket.append(entry)
 
         if by_model:
             models[device_type] = by_model
             resolved_org_id = _resolve_mist_org_id((os.getenv("MIST_TOKEN") or "").strip(), _mist_api_base_url()) or ""
             sources[device_type] = {
                 "endpoint": f"/orgs/{resolved_org_id}/devices/versions?type={device_type}",
-                "tag_filter": SUGGESTED_FIRMWARE_TAG,
+                "tag_filter": "alpha" if device_type == "ap" else SUGGESTED_FIRMWARE_TAG,
                 "updated_at": _utc_now().isoformat().replace("+00:00", "Z"),
             }
             any_changes = True
