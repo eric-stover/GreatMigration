@@ -1109,6 +1109,110 @@ def test_configuration_overrides_check_flags_invalid_wan_oob_config():
     assert "oob_ip_config.use_mgmt_vrf" in diff_paths
     assert "oob_ip_config.use_mgmt_vrf_for_host_out" in diff_paths
 
+
+
+def test_configuration_overrides_check_flags_unexpected_wan_up_ports():
+    ctx = SiteContext(
+        site_id="site-12c",
+        site_name="WAN Site Active Ports",
+        site={},
+        setting={},
+        templates=[
+            {
+                "id": "tmpl-1",
+                "name": "Standard",
+                "switch_config": {
+                    "ip_config": {
+                        "type": "static",
+                        "ip": "10.0.0.2",
+                        "gateway": "10.0.0.1",
+                        "network": "IT_Mgmt",
+                        "netmask": "255.255.255.0",
+                    }
+                },
+            }
+        ],
+        devices=[
+            {
+                "id": "wan4",
+                "name": "WAN Switch Active Ports",
+                "role": "wan",
+                "status": "connected",
+                "switch_template_id": "tmpl-1",
+                "switch_config": {
+                    "oob_ip_config": {
+                        "type": "static",
+                        "ip": "10.20.20.20",
+                        "gateway": "10.20.20.1",
+                        "netmask": "255.255.255.0",
+                        "use_mgmt_vrf": True,
+                        "use_mgmt_vrf_for_host_out": True,
+                    }
+                },
+                "if_stat": {
+                    "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True},
+                    "ge-0/0/4.0": {"port_id": "ge-0/0/4", "up": True},
+                    "xe-0/2/0.0": {"port_id": "xe-0/2/0", "up": True},
+                    "lo0.0": {"port_id": "lo0", "up": True},
+                },
+            }
+        ],
+    )
+
+    check = ConfigurationOverridesCheck()
+    findings = check.run(ctx)
+    wan_findings = [f for f in findings if f.device_id == "wan4"]
+    assert wan_findings, "WAN device with unexpected active ports should be flagged"
+
+    if_stat_diffs = [
+        diff
+        for finding in wan_findings
+        for diff in (finding.details or {}).get("diffs", [])
+        if diff.get("path") == "if_stat"
+    ]
+    assert if_stat_diffs
+    assert if_stat_diffs[0]["actual"] == ["xe-0/2/0"]
+
+
+def test_configuration_overrides_check_allows_expected_wan_up_ports():
+    ctx = SiteContext(
+        site_id="site-12d",
+        site_name="WAN Site Allowed Ports",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "wan5",
+                "name": "WAN Switch Allowed Ports",
+                "role": "WAN",
+                "status": "connected",
+                "switch_config": {
+                    "oob_ip_config": {
+                        "type": "static",
+                        "ip": "10.20.20.20",
+                        "gateway": "10.20.20.1",
+                        "netmask": "255.255.255.0",
+                        "use_mgmt_vrf": True,
+                        "use_mgmt_vrf_for_host_out": True,
+                    }
+                },
+                "if_stat": {
+                    "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True},
+                    "mge-0/0/4.0": {"port_id": "mge-0/0/4", "up": True},
+                    "ge-0/0/8.0": {"port_id": "ge-0/0/8", "up": True},
+                    "ge-0/0/12.0": {"port_id": "ge-0/0/12", "up": True},
+                    "ge-0/0/16.0": {"port_id": "ge-0/0/16", "up": True},
+                    "lo0.0": {"port_id": "lo0", "up": True},
+                },
+            }
+        ],
+    )
+
+    check = ConfigurationOverridesCheck()
+    findings = check.run(ctx)
+    assert all(f.device_id != "wan5" for f in findings)
+
 def test_device_naming_convention_enforces_pattern():
     ctx = SiteContext(
         site_id="site-9",
