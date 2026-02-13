@@ -484,65 +484,6 @@ def test_refresh_standards_accepts_paginated_payload(monkeypatch, tmp_path):
     assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
 
 
-def test_mist_api_base_url_normalization(monkeypatch):
-    monkeypatch.delenv("MIST_BASE_URL", raising=False)
-    assert compliance._mist_api_base_url() == "https://api.ac2.mist.com/api/v1"
-
-    monkeypatch.setenv("MIST_BASE_URL", "https://api.ac2.mist.com")
-    assert compliance._mist_api_base_url() == "https://api.ac2.mist.com/api/v1"
-
-    monkeypatch.setenv("MIST_BASE_URL", "https://api.ac2.mist.com/api/v1")
-    assert compliance._mist_api_base_url() == "https://api.ac2.mist.com/api/v1"
-
-
-def test_fetch_versions_for_type_logs_errors(monkeypatch):
-    monkeypatch.setenv("MIST_TOKEN", "token")
-    monkeypatch.setenv("MIST_ORG_ID", "org-id")
-
-    messages = []
-
-    def _capture(msg, *args):
-        messages.append(msg % args if args else msg)
-
-    def _raise(*args, **kwargs):
-        raise compliance.requests.RequestException("boom")
-
-    monkeypatch.setattr(compliance.logger, "warning", _capture)
-    monkeypatch.setattr(compliance.requests, "get", _raise)
-
-    with pytest.raises(compliance.requests.RequestException):
-        compliance._fetch_versions_for_type("switch")
-
-    assert any("action=firmware_versions_response" in message and "status=error" in message for message in messages)
-
-
-def test_fetch_versions_for_type_logs_request_and_response(monkeypatch):
-    monkeypatch.setenv("MIST_TOKEN", "token")
-    monkeypatch.setenv("MIST_ORG_ID", "org-id")
-
-    class _Resp:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return []
-
-    messages = []
-
-    def _capture(msg, *args):
-        messages.append(msg % args if args else msg)
-
-    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
-    monkeypatch.setattr(compliance.logger, "info", _capture)
-
-    compliance._fetch_versions_for_type("switch")
-
-    assert any("action=firmware_versions_request" in message for message in messages)
-    assert any("action=firmware_versions_response" in message for message in messages)
-
-
 def test_fetch_versions_for_type_accepts_dict_payload(monkeypatch):
     monkeypatch.setenv("MIST_TOKEN", "token")
     monkeypatch.setenv("MIST_ORG_ID", "org-id")

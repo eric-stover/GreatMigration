@@ -272,24 +272,16 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
         return []
     url = f"{base}/orgs/{org_id}/devices/versions"
     logger.info("action=firmware_versions_request type=%s url=%s", device_type, url)
-    try:
-        resp = requests.get(
-            url,
-            headers={"Authorization": f"Token {token}"},
-            params={"type": device_type},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except requests.RequestException as exc:
-        logger.warning("action=firmware_versions_response type=%s status=error error=%s", device_type, exc)
-        raise
-    except ValueError as exc:
-        logger.warning("action=firmware_versions_response type=%s status=invalid_json error=%s", device_type, exc)
-        return []
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"type": device_type},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
 
     rows: Sequence[Any]
-    payload_shape = type(payload).__name__
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, Mapping):
@@ -297,23 +289,13 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
             candidate = payload.get(key)
             if isinstance(candidate, list):
                 rows = candidate
-                payload_shape = f"dict:{key}"
                 break
         else:
             rows = []
     else:
         rows = []
 
-    parsed_rows = [row for row in rows if isinstance(row, dict)]
-    logger.info(
-        "action=firmware_versions_response type=%s status=%s payload_shape=%s rows_total=%s rows_parsed=%s",
-        device_type,
-        getattr(resp, "status_code", "unknown"),
-        payload_shape,
-        len(rows),
-        len(parsed_rows),
-    )
-    return parsed_rows
+    return [row for row in rows if isinstance(row, dict)]
 
 
 
