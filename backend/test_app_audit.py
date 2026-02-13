@@ -78,6 +78,11 @@ def test_fetch_site_context_merges_device_details(monkeypatch, app_module):
             "switch_config": {"vlans": [10]},
             "extra": "detail",
         },
+        "/sites/site-1/stats/devices/dev-1?type=switch": {
+            "if_stat": {
+                "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True}
+            }
+        },
         "/sites/site-1/devices/dev-2": None,
         "/sites/site-1/devices/dev-3": None,
         "/sites/site-1/switch_templates/template-1": {
@@ -119,6 +124,7 @@ def test_fetch_site_context_merges_device_details(monkeypatch, app_module):
     assert "/sites/site-1/stats/devices?type=switch&limit=1000" in calls
     assert "/sites/site-1/stats/devices?type=ap&limit=1000" in calls
     assert "/sites/site-1/devices/dev-1" in calls
+    assert "/sites/site-1/stats/devices/dev-1?type=switch" in calls
     assert "/sites/site-1/devices/dev-2" in calls
     assert "/sites/site-1/switch_templates/template-1" in calls
 
@@ -163,6 +169,7 @@ def test_fetch_site_context_filters_recent_last_seen(monkeypatch, app_module):
         "/sites/site-1/devices/missing": None,
         "/sites/site-1/devices/recent-iso": None,
         "/sites/site-1/devices/recent-ms": None,
+        "/sites/site-1/stats/devices/recent-ms?type=switch": {},
         "/sites/site-1/switch_templates/template-1": {"id": "template-1"},
     }
 
