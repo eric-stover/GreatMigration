@@ -268,6 +268,7 @@ Think of the backend as a set of small “helpers” that each do one job:
   * Override naming patterns via `SWITCH_NAME_REGEX_PATTERN` / `AP_NAME_REGEX_PATTERN`.
   * Adjust required site variables with `MIST_SITE_VARIABLES`. Use `key=value` entries (for example, `hubDNSserver1=10.0.0.53`) to supply environment defaults that the 1 Click Fix action can apply automatically when a site is missing values.
   * Enforce device documentation photo counts with `SW_NUM_IMG` and `AP_NUM_IMG`.
+  * Firmware standards for compliance are read from `backend/standard_fw_versions.json`. The app pulls suggested switch/AP versions from Mist on first run (or whenever the file has no stored versions), then refreshes every 90 days when `MIST_TOKEN` and `MIST_ORG_ID` are configured.
 * **1 Click Fix safeguards**
   * AP rename actions derive new names from switch LLDP neighbours. Sites lacking neighbour data will surface actionable warnings but skip changes.
   * Switch DNS cleanup actions verify the applied template (`Prod - Standard Template` for production sites, `Lab` template for lab sites) and the presence of `siteDNSserver`, `hubDNSserver1`, and `hubDNSserver2`. Buttons remain disabled until both checks pass and are annotated with details describing any failures.

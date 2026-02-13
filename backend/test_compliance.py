@@ -1,4 +1,10 @@
+import json
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import pytest
+import compliance
 
 from compliance import (
     SiteContext,
@@ -407,9 +413,89 @@ def test_configuration_overrides_check_detects_template_differences():
     assert access2_findings, "Access switch IP violations should be reported"
 
 
-def test_firmware_management_check_flags_unapproved_versions(monkeypatch):
-    monkeypatch.setenv("STD_SW_VER", "20.4R3-S4,22.1R1")
-    monkeypatch.setenv("STD_AP_VER", "16.0.2")
+def _write_standard_versions(path: Path, *, switch_versions, ap_versions, generated_at="2025-01-01T00:00:00Z"):
+    payload = {
+        "generated_at": generated_at,
+        "sources": {},
+        "models": {
+            "switch": {
+                "EX2300": [{"version": version} for version in switch_versions],
+            },
+            "ap": {
+                "AP32": [{"version": version} for version in ap_versions],
+            },
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+
+
+def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": recent,
+                "sources": {},
+                "models": {"switch": {}, "ap": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"], "record_id": "1"}]
+        if device_type == "ap":
+            return [{"model": "AP32", "version": "0.12.27452", "tags": ["junos_suggested"], "record_id": "2"}]
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    versions = compliance._load_allowed_versions_from_standard_doc("switch")
+
+    assert "20.4R3-S4" in versions
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
+    assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
+
+
+def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": recent,
+                "sources": {},
+                "models": {
+                    "switch": {"EX2300": [{"version": "20.4R3-S4"}]},
+                    "ap": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fail_fetch(_device_type):
+        raise AssertionError("fetch should not be called for recent non-empty standards")
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fail_fetch)
+
+    versions = compliance._load_allowed_versions_from_standard_doc("switch")
+    assert versions == ("20.4R3-S4",)
+
+def test_firmware_management_check_flags_unapproved_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standards.json"
+    _write_standard_versions(standards_path, switch_versions=["20.4R3-S4", "22.1R1"], ap_versions=["16.0.2"])
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
 
     ctx = SiteContext(
         site_id="site-fw",
@@ -436,9 +522,10 @@ def test_firmware_management_check_flags_unapproved_versions(monkeypatch):
         assert finding.details.get("allowed_versions")
 
 
-def test_firmware_management_check_allows_approved_versions(monkeypatch):
-    monkeypatch.setenv("STD_SW_VER", "20.4R3-S4")
-    monkeypatch.setenv("STD_AP_VER", "16.0.2")
+def test_firmware_management_check_allows_approved_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standards.json"
+    _write_standard_versions(standards_path, switch_versions=["20.4R3-S4"], ap_versions=["16.0.2"])
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
 
     ctx = SiteContext(
         site_id="site-fw-pass",
@@ -456,9 +543,10 @@ def test_firmware_management_check_allows_approved_versions(monkeypatch):
     assert check.run(ctx) == []
 
 
-def test_firmware_management_check_skips_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("STD_SW_VER", raising=False)
-    monkeypatch.delenv("STD_AP_VER", raising=False)
+def test_firmware_management_check_skips_when_unconfigured(monkeypatch, tmp_path):
+    standards_path = tmp_path / "empty-standards.json"
+    _write_standard_versions(standards_path, switch_versions=[], ap_versions=[])
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
 
     ctx = SiteContext(
         site_id="site-fw-empty",
