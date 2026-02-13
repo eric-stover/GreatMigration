@@ -22,6 +22,10 @@ from audit_actions import (
     SET_SITE_VARIABLES_ACTION_ID,
     SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
+from logging_utils import get_user_logger
+
+
+logger = get_user_logger()
 
 
 @dataclass
@@ -248,8 +252,15 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     org_id = (os.getenv("MIST_ORG_ID") or "").strip()
     base = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com/api/v1").strip().rstrip("/")
     if not token or not org_id:
+        logger.info(
+            "action=firmware_versions_request type=%s status=skipped reason=missing_mist_env token_present=%s org_present=%s",
+            device_type,
+            bool(token),
+            bool(org_id),
+        )
         return []
     url = f"{base}/orgs/{org_id}/devices/versions"
+    logger.info("action=firmware_versions_request type=%s url=%s", device_type, url)
     resp = requests.get(
         url,
         headers={"Authorization": f"Token {token}"},
@@ -299,10 +310,12 @@ def _standards_doc_has_versions(doc: Mapping[str, Any]) -> bool:
 
 def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[str, Any]:
     path = path or _firmware_standards_path()
+    logger.info("action=firmware_standards_refresh path=%s", path)
     doc = _load_firmware_standards_doc(path)
     generated_at = _parse_iso8601(doc.get("generated_at"))
     has_versions = _standards_doc_has_versions(doc)
     if generated_at is not None and has_versions and (_utc_now() - generated_at) < timedelta(days=FIRMWARE_REFRESH_DAYS):
+        logger.info("action=firmware_standards_refresh status=skipped reason=recent_cache")
         return doc
 
     updated = copy.deepcopy(doc)
@@ -345,7 +358,15 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
 
     if any_changes:
         _save_firmware_standards_doc(updated, path)
+        model_counts = {
+            key: len(value) for key, value in models.items() if isinstance(value, Mapping)
+        }
+        logger.info(
+            "action=firmware_standards_refresh status=updated model_counts=%s",
+            model_counts,
+        )
         return updated
+    logger.info("action=firmware_standards_refresh status=unchanged reason=no_suggested_versions")
     return doc
 
 
