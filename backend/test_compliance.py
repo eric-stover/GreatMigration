@@ -622,20 +622,51 @@ def test_fetch_versions_for_type_ap_without_fallback_for_non_ap(monkeypatch):
     assert rows == []
 
 
-
 def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
 
-    def _fake_fetch(_device_type):
-        return [{"model": "AP32", "version": "0.12.27452", "tags": "beta,junos_suggested"}]
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S4", "tags": "beta,junos_suggested"}]
+        if device_type == "ap":
+            return [{"model": "AP32", "version": "0.12.27452", "tag": "alpha", "tags": ["alpha"]}]
+        return []
 
     monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
 
     compliance._refresh_firmware_standards_if_needed(standards_path)
 
     written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
+
+
+def test_refresh_standards_uses_ap_alpha_tag_and_drops_internal_version_field(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
+        if device_type == "ap":
+            return [
+                {"model": "AP32E", "version": "0.12.27452", "_version": "apfw-0.12.27452-lollys-5ba8", "tag": "alpha", "tags": ["alpha"]},
+                {"model": "AP45", "version": "0.13.30000", "tag": "stable", "tags": ["stable"]},
+            ]
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    ap_entry = written["models"]["ap"]["AP32E"][0]
+    assert ap_entry["version"] == "0.12.27452"
+    assert ap_entry["tag"] == "alpha"
+    assert ap_entry["tags"] == ["alpha"]
+    assert "_version" not in ap_entry
+    assert "AP45" not in written["models"]["ap"]
 
 def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
