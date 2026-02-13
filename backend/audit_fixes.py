@@ -38,6 +38,9 @@ else:
 SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
     r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)[A-Z]{2}\d+$"
 )
+SPARE_SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
+    r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)SPARE$"
+)
 
 
 def _mist_headers(token: str) -> Dict[str, str]:
@@ -489,7 +492,14 @@ def _has_active_physical_switch_ports(value: Any, visited: Optional[Set[int]] = 
 
 
 def _propose_spare_switch_name(current_name: str) -> Optional[str]:
-    match = SWITCH_LOCATION_EXTRACT_PATTERN.match((current_name or "").strip())
+    raw_name = (current_name or "").strip()
+    normalized_name = re.sub(r"[^A-Za-z0-9]", "", raw_name).upper()
+
+    match = SWITCH_LOCATION_EXTRACT_PATTERN.match(raw_name)
+    if not match:
+        match = SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
+    if not match:
+        match = SPARE_SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
     if not match:
         return None
     candidate = f"{match.group('region')}{match.group('site')}MDFSPARE"
