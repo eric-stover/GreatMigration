@@ -601,6 +601,33 @@ def _build_standards_table_payload(max_versions: int = 6) -> Dict[str, Any]:
     }
 
 
+def _extract_inventory_models(payload: Any) -> Set[str]:
+    models: Set[str] = set()
+    if not isinstance(payload, Mapping):
+        return models
+
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return models
+
+    for item in results:
+        if not isinstance(item, Mapping):
+            continue
+        model = item.get("model")
+        if not isinstance(model, str):
+            continue
+        normalized = model.strip()
+        if normalized:
+            models.add(normalized.lower())
+
+    return models
+
+
+def _fetch_production_models(base_url: str, headers: Dict[str, str], org_id: str) -> Set[str]:
+    data = _mist_get_json(base_url, headers, f"/orgs/{org_id}/inventory/count?distinct=model&limit=1000", optional=True)
+    return _extract_inventory_models(data)
+
+
 @app.get("/standards", response_class=HTMLResponse)
 def standards_page():
     return _render_page("standards.html", "standards")
@@ -608,7 +635,21 @@ def standards_page():
 
 @app.get("/api/standards")
 def api_standards_table():
-    return {"ok": True, "table": _build_standards_table_payload()}
+    table = _build_standards_table_payload()
+    token = _load_mist_token()
+    headers = _mist_headers(token)
+    org_ids = [DEFAULT_ORG_ID] if DEFAULT_ORG_ID else _discover_org_ids(DEFAULT_BASE_URL, headers)
+
+    production_models: Set[str] = set()
+    for org_id in org_ids:
+        production_models.update(_fetch_production_models(DEFAULT_BASE_URL, headers, org_id))
+
+    table["rows"] = [
+        row
+        for row in table.get("rows", [])
+        if isinstance(row, Mapping) and isinstance(row.get("model"), str) and row["model"].strip().lower() in production_models
+    ]
+    return {"ok": True, "table": table}
 
 
 def _load_mist_token() -> str:
