@@ -247,10 +247,21 @@ def _save_firmware_standards_doc(doc: Dict[str, Any], path: Optional[Path] = Non
     tmp.replace(path)
 
 
+
+
+def _mist_api_base_url() -> str:
+    raw = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com").strip().rstrip("/")
+    if not raw:
+        raw = "https://api.ac2.mist.com"
+    if raw.endswith("/api/v1"):
+        return raw
+    return f"{raw}/api/v1"
+
+
 def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     token = (os.getenv("MIST_TOKEN") or "").strip()
     org_id = (os.getenv("MIST_ORG_ID") or "").strip()
-    base = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com/api/v1").strip().rstrip("/")
+    base = _mist_api_base_url()
     if not token or not org_id:
         logger.info(
             "action=firmware_versions_request type=%s status=skipped reason=missing_mist_env token_present=%s org_present=%s",
