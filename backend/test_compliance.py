@@ -501,6 +501,66 @@ def test_fetch_versions_for_type_accepts_dict_payload(monkeypatch):
     assert rows == [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
 
 
+
+def test_fetch_versions_for_type_discovers_org_via_self(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.delenv("MIST_ORG_ID", raising=False)
+    monkeypatch.setattr(compliance, "_MIST_ORG_ID_CACHE", None)
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def _fake_get(url, **kwargs):
+        calls.append(url)
+        if url.endswith("/self"):
+            return _Resp({"org_id": "derived-org"})
+        return _Resp({"results": [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]})
+
+    monkeypatch.setattr(compliance.requests, "get", _fake_get)
+
+    rows = compliance._fetch_versions_for_type("switch")
+
+    assert rows == [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
+    assert any(call.endswith("/self") for call in calls)
+    assert any("/orgs/derived-org/devices/versions" in call for call in calls)
+
+
+def test_fetch_versions_for_type_uses_cached_org_id(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.delenv("MIST_ORG_ID", raising=False)
+    monkeypatch.setattr(compliance, "_MIST_ORG_ID_CACHE", "cached-org")
+
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]}
+
+    def _fake_get(url, **kwargs):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(compliance.requests, "get", _fake_get)
+
+    rows = compliance._fetch_versions_for_type("switch")
+
+    assert rows == [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
+    assert all(not call.endswith("/self") for call in calls)
+    assert any("/orgs/cached-org/devices/versions" in call for call in calls)
+
+
 def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)

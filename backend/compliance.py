@@ -258,10 +258,50 @@ def _mist_api_base_url() -> str:
     return f"{raw}/api/v1"
 
 
+_MIST_ORG_ID_CACHE: Optional[str] = None
+
+
+def _resolve_mist_org_id(token: str, base_url: str) -> Optional[str]:
+    configured_org_id = (os.getenv("MIST_ORG_ID") or "").strip()
+    if configured_org_id:
+        return configured_org_id
+
+    global _MIST_ORG_ID_CACHE
+    if _MIST_ORG_ID_CACHE:
+        return _MIST_ORG_ID_CACHE
+
+    whoami_url = f"{base_url}/self"
+    logger.info("action=mist_self_discovery url=%s", whoami_url)
+    try:
+        resp = requests.get(
+            whoami_url,
+            headers={"Authorization": f"Token {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("action=mist_self_discovery status=failed error=%s", exc)
+        return None
+
+    payload = resp.json()
+    if not isinstance(payload, Mapping):
+        logger.warning("action=mist_self_discovery status=failed reason=unexpected_payload")
+        return None
+
+    discovered_org_id = payload.get("org_id")
+    if not isinstance(discovered_org_id, str) or not discovered_org_id.strip():
+        logger.warning("action=mist_self_discovery status=failed reason=missing_org_id")
+        return None
+
+    _MIST_ORG_ID_CACHE = discovered_org_id.strip()
+    logger.info("action=mist_self_discovery status=resolved")
+    return _MIST_ORG_ID_CACHE
+
+
 def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     token = (os.getenv("MIST_TOKEN") or "").strip()
-    org_id = (os.getenv("MIST_ORG_ID") or "").strip()
     base = _mist_api_base_url()
+    org_id = _resolve_mist_org_id(token, base) if token else None
     if not token or not org_id:
         logger.info(
             "action=firmware_versions_request type=%s status=skipped reason=missing_mist_env token_present=%s org_present=%s",
