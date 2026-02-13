@@ -465,6 +465,83 @@ def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
 
 
+
+
+def test_refresh_standards_accepts_paginated_payload(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(_device_type):
+        return [
+            {"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"], "record_id": "1"},
+        ]
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
+
+
+def test_fetch_versions_for_type_logs_request_and_response(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-id")
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    messages = []
+
+    def _capture(msg, *args):
+        messages.append(msg % args if args else msg)
+
+    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
+    monkeypatch.setattr(compliance.logger, "info", _capture)
+
+    compliance._fetch_versions_for_type("switch")
+
+    assert any("action=firmware_versions_request" in message for message in messages)
+    assert any("action=firmware_versions_response" in message for message in messages)
+
+
+def test_fetch_versions_for_type_accepts_dict_payload(monkeypatch):
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-id")
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"results": [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]}
+
+    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
+
+    rows = compliance._fetch_versions_for_type("switch")
+    assert rows == [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"]}]
+
+
+def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(_device_type):
+        return [{"model": "AP32", "version": "0.12.27452", "tags": "beta,junos_suggested"}]
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["AP32"][0]["version"] == "0.12.27452"
+
 def test_skip_refresh_when_recent_file_has_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -597,6 +674,29 @@ def test_firmware_management_check_skips_when_unconfigured(monkeypatch, tmp_path
 
     check = FirmwareManagementCheck()
     assert check.run(ctx) == []
+
+
+def test_firmware_management_check_prepare_run_reloads_dynamic_versions(monkeypatch):
+    calls = {"switch": 0, "ap": 0}
+
+    def _fake_load(device_type):
+        calls[device_type] += 1
+        if calls[device_type] == 1:
+            return ()
+        if device_type == "switch":
+            return ("20.4R3-S4",)
+        return ("0.12.27452",)
+
+    monkeypatch.setattr(compliance, "_load_allowed_versions_from_standard_doc", _fake_load)
+
+    check = FirmwareManagementCheck()
+    assert check.allowed_switch_versions == ()
+    assert check.allowed_ap_versions == ()
+
+    check.prepare_run()
+
+    assert check.allowed_switch_versions == ("20.4R3-S4",)
+    assert check.allowed_ap_versions == ("0.12.27452",)
 
 
 def test_cloud_management_check_flags_unmanaged_switch():
