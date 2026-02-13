@@ -599,6 +599,29 @@ def test_firmware_management_check_skips_when_unconfigured(monkeypatch, tmp_path
     assert check.run(ctx) == []
 
 
+def test_firmware_management_check_prepare_run_reloads_dynamic_versions(monkeypatch):
+    calls = {"switch": 0, "ap": 0}
+
+    def _fake_load(device_type):
+        calls[device_type] += 1
+        if calls[device_type] == 1:
+            return ()
+        if device_type == "switch":
+            return ("20.4R3-S4",)
+        return ("0.12.27452",)
+
+    monkeypatch.setattr(compliance, "_load_allowed_versions_from_standard_doc", _fake_load)
+
+    check = FirmwareManagementCheck()
+    assert check.allowed_switch_versions == ()
+    assert check.allowed_ap_versions == ()
+
+    check.prepare_run()
+
+    assert check.allowed_switch_versions == ("20.4R3-S4",)
+    assert check.allowed_ap_versions == ("0.12.27452",)
+
+
 def test_cloud_management_check_flags_unmanaged_switch():
     ctx = SiteContext(
         site_id="site-cloud-1",
