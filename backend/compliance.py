@@ -22,6 +22,10 @@ from audit_actions import (
     SET_SITE_VARIABLES_ACTION_ID,
     SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
+from logging_utils import get_user_logger
+
+
+logger = get_user_logger()
 
 
 @dataclass
@@ -243,24 +247,73 @@ def _save_firmware_standards_doc(doc: Dict[str, Any], path: Optional[Path] = Non
     tmp.replace(path)
 
 
+
+
+def _mist_api_base_url() -> str:
+    raw = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com").strip().rstrip("/")
+    if not raw:
+        raw = "https://api.ac2.mist.com"
+    if raw.endswith("/api/v1"):
+        return raw
+    return f"{raw}/api/v1"
+
+
 def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     token = (os.getenv("MIST_TOKEN") or "").strip()
     org_id = (os.getenv("MIST_ORG_ID") or "").strip()
-    base = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com/api/v1").strip().rstrip("/")
+    base = _mist_api_base_url()
     if not token or not org_id:
+        logger.info(
+            "action=firmware_versions_request type=%s status=skipped reason=missing_mist_env token_present=%s org_present=%s",
+            device_type,
+            bool(token),
+            bool(org_id),
+        )
         return []
     url = f"{base}/orgs/{org_id}/devices/versions"
-    resp = requests.get(
-        url,
-        headers={"Authorization": f"Token {token}"},
-        params={"type": device_type},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    if not isinstance(payload, list):
+    logger.info("action=firmware_versions_request type=%s url=%s", device_type, url)
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Token {token}"},
+            params={"type": device_type},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except requests.RequestException as exc:
+        logger.warning("action=firmware_versions_response type=%s status=error error=%s", device_type, exc)
+        raise
+    except ValueError as exc:
+        logger.warning("action=firmware_versions_response type=%s status=invalid_json error=%s", device_type, exc)
         return []
-    return [row for row in payload if isinstance(row, dict)]
+
+    rows: Sequence[Any]
+    payload_shape = type(payload).__name__
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                payload_shape = f"dict:{key}"
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    parsed_rows = [row for row in rows if isinstance(row, dict)]
+    logger.info(
+        "action=firmware_versions_response type=%s status=%s payload_shape=%s rows_total=%s rows_parsed=%s",
+        device_type,
+        getattr(resp, "status_code", "unknown"),
+        payload_shape,
+        len(rows),
+        len(parsed_rows),
+    )
+    return parsed_rows
 
 
 
@@ -286,10 +339,12 @@ def _standards_doc_has_versions(doc: Mapping[str, Any]) -> bool:
 
 def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[str, Any]:
     path = path or _firmware_standards_path()
+    logger.info("action=firmware_standards_refresh path=%s", path)
     doc = _load_firmware_standards_doc(path)
     generated_at = _parse_iso8601(doc.get("generated_at"))
     has_versions = _standards_doc_has_versions(doc)
     if generated_at is not None and has_versions and (_utc_now() - generated_at) < timedelta(days=FIRMWARE_REFRESH_DAYS):
+        logger.info("action=firmware_standards_refresh status=skipped reason=recent_cache")
         return doc
 
     updated = copy.deepcopy(doc)
@@ -304,9 +359,15 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
         by_model: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
             tags = row.get("tags")
+            if isinstance(tags, list):
+                normalized_tags = {str(tag).strip() for tag in tags if str(tag).strip()}
+            elif isinstance(tags, str):
+                normalized_tags = {part.strip() for part in tags.split(",") if part.strip()}
+            else:
+                normalized_tags = set()
             model = row.get("model")
             version = row.get("version")
-            if not isinstance(tags, list) or SUGGESTED_FIRMWARE_TAG not in tags:
+            if SUGGESTED_FIRMWARE_TAG not in normalized_tags:
                 continue
             if not isinstance(model, str) or not model.strip() or not isinstance(version, str) or not version.strip():
                 continue
@@ -326,7 +387,15 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
 
     if any_changes:
         _save_firmware_standards_doc(updated, path)
+        model_counts = {
+            key: len(value) for key, value in models.items() if isinstance(value, Mapping)
+        }
+        logger.info(
+            "action=firmware_standards_refresh status=updated model_counts=%s",
+            model_counts,
+        )
         return updated
+    logger.info("action=firmware_standards_refresh status=unchanged reason=no_suggested_versions")
     return doc
 
 
@@ -1937,14 +2006,24 @@ class FirmwareManagementCheck(ComplianceCheck):
         allowed_switch_versions: Optional[Sequence[str]] = None,
         allowed_ap_versions: Optional[Sequence[str]] = None,
     ) -> None:
-        if allowed_switch_versions is None:
-            allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
-        if allowed_ap_versions is None:
-            allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
+        self._dynamic_switch_versions = allowed_switch_versions is None
+        self._dynamic_ap_versions = allowed_ap_versions is None
         self.allowed_switch_versions: Tuple[str, ...] = tuple(allowed_switch_versions or ())
         self.allowed_ap_versions: Tuple[str, ...] = tuple(allowed_ap_versions or ())
+        self._allowed_switch_set: Set[str] = set()
+        self._allowed_ap_set: Set[str] = set()
+        self._refresh_allowed_versions()
+
+    def _refresh_allowed_versions(self) -> None:
+        if self._dynamic_switch_versions:
+            self.allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
+        if self._dynamic_ap_versions:
+            self.allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
         self._allowed_switch_set = {value for value in self.allowed_switch_versions}
         self._allowed_ap_set = {value for value in self.allowed_ap_versions}
+
+    def prepare_run(self) -> None:
+        self._refresh_allowed_versions()
 
     def run(self, context: SiteContext) -> List[Finding]:
         if not self.allowed_switch_versions and not self.allowed_ap_versions:
