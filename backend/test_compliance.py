@@ -628,6 +628,88 @@ def test_firmware_management_check_allows_approved_versions(monkeypatch, tmp_pat
     assert check.run(ctx) == []
 
 
+def test_firmware_management_check_uses_model_specific_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standards.json"
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2025-01-01T00:00:00Z",
+                "sources": {},
+                "models": {
+                    "switch": {
+                        "EX2300": [{"version": "20.4R3-S4"}],
+                        "EX4100": [{"version": "22.2R1"}],
+                    },
+                    "ap": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    ctx = SiteContext(
+        site_id="site-fw-model",
+        site_name="Firmware Model",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-model-1",
+                "name": "Switch Model 1",
+                "type": "switch",
+                "model": "EX4100",
+                "firmware_version": "20.4R3-S4",
+            }
+        ],
+    )
+
+    findings = FirmwareManagementCheck().run(ctx)
+
+    assert len(findings) == 1
+    assert findings[0].details["allowed_versions"] == ["22.2R1"]
+
+
+def test_firmware_management_check_normalizes_model_lookup(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standards.json"
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2025-01-01T00:00:00Z",
+                "sources": {},
+                "models": {
+                    "switch": {
+                        "EX4000-24T": [{"version": "24.4R2.25"}],
+                    },
+                    "ap": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    ctx = SiteContext(
+        site_id="site-fw-model-normalized",
+        site_name="Firmware Model Normalized",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-model-2",
+                "name": "Switch Model 2",
+                "type": "switch",
+                "model": 'EX4000-24T"',
+                "firmware_version": "24.4R2.25",
+            }
+        ],
+    )
+
+    assert FirmwareManagementCheck().run(ctx) == []
+
+
 def test_firmware_management_check_skips_when_unconfigured(monkeypatch, tmp_path):
     standards_path = tmp_path / "empty-standards.json"
     _write_standard_versions(standards_path, switch_versions=[], ap_versions=[])
