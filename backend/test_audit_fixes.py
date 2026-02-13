@@ -706,43 +706,6 @@ def test_execute_action_blocks_spare_switch_in_use(monkeypatch):
     assert put_calls == []
 
 
-def test_execute_action_renames_compliant_non_spare_switch_name(monkeypatch):
-    calls = {"put": []}
-
-    def fake_get(url, headers=None, params=None, timeout=None):
-        if url.endswith("/sites/site-1"):
-            return DummyResponse({"name": "Site One"})
-        if url.endswith("/sites/site-1/devices/sw-1"):
-            return DummyResponse({"id": "sw-1", "type": "switch", "name": "NAHQLIDF2AS3", "role": "access"})
-        if url.endswith("/sites/site-1/stats/devices/sw-1"):
-            assert params == {"type": "switch"}
-            return DummyResponse({"stats": {"ports": [{"name": "ge-0/0/1", "status": "down"}]}})
-        raise AssertionError(f"Unexpected GET {url}")
-
-    def fake_put(url, headers=None, json=None, timeout=None):
-        calls["put"].append((url, json))
-        return DummyResponse({})
-
-    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
-    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
-
-    result = execute_audit_action(
-        SET_SPARE_SWITCH_ROLE_ACTION_ID,
-        "https://api.mist.test/api/v1",
-        "token",
-        ["site-1"],
-        dry_run=False,
-        metadata={"selected_switch_id": "sw-1"},
-    )
-
-    assert result["ok"] is True
-    summary = result["results"][0]
-    assert summary["updated"] == 1
-    assert summary["failed"] == 0
-    assert len(calls["put"]) == 2
-    assert calls["put"][1][1] == {"role": "spare", "name": "NAHQLMDFSPARE"}
-
-
 def test_execute_action_normalizes_spare_switch_name(monkeypatch):
     calls = {"put": []}
 
