@@ -156,9 +156,13 @@ PAGE_COPY: dict[str, dict[str, str]] = {
         "title": "Port Profile Rules",
         "tagline": "Create and reorder port mapping rules",
     },
+    "standards": {
+        "title": "Standards",
+        "tagline": "Review model-specific firmware standards across recent revisions",
+    },
 }
 
-NAV_LINK_KEYS = ("hardware", "replacements", "config", "audit", "rules")
+NAV_LINK_KEYS = ("hardware", "replacements", "config", "rules", "standards", "audit")
 
 
 class SSHDeviceModel(BaseModel):
@@ -530,6 +534,81 @@ def replacements_page():
 @app.get("/hardware", response_class=HTMLResponse)
 def hardware_page():
     return _render_page("hardware.html", "hardware")
+
+
+def _firmware_standards_path() -> Path:
+    return Path(__file__).resolve().parent / "standard_fw_versions.json"
+
+
+def _build_standards_table_payload(max_versions: int = 6) -> Dict[str, Any]:
+    columns = [f"Standard {idx}" for idx in range(1, max_versions + 1)]
+    empty = {
+        "generated_at": None,
+        "columns": columns,
+        "rows": [],
+    }
+
+    path = _firmware_standards_path()
+    if not path.exists():
+        return empty
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return empty
+    if not isinstance(blob, Mapping):
+        return empty
+
+    models_blob = blob.get("models")
+    if not isinstance(models_blob, Mapping):
+        return empty
+
+    rows: List[Dict[str, Any]] = []
+    for device_type in ("switch", "ap"):
+        type_rows = models_blob.get(device_type)
+        if not isinstance(type_rows, Mapping):
+            continue
+        for model, entries in type_rows.items():
+            if not isinstance(model, str) or not isinstance(entries, list):
+                continue
+            versions: List[str] = []
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                version = entry.get("version")
+                if not isinstance(version, str):
+                    continue
+                normalized = version.strip()
+                if normalized:
+                    versions.append(normalized)
+                if len(versions) >= max_versions:
+                    break
+            if not versions:
+                continue
+            padded = versions + [""] * (max_versions - len(versions))
+            rows.append(
+                {
+                    "model": model.strip(),
+                    "device_type": "Switch" if device_type == "switch" else "AP",
+                    "standards": padded,
+                }
+            )
+
+    rows.sort(key=lambda row: (row.get("model") or "", row.get("device_type") or ""))
+    return {
+        "generated_at": blob.get("generated_at"),
+        "columns": columns,
+        "rows": rows,
+    }
+
+
+@app.get("/standards", response_class=HTMLResponse)
+def standards_page():
+    return _render_page("standards.html", "standards")
+
+
+@app.get("/api/standards")
+def api_standards_table():
+    return {"ok": True, "table": _build_standards_table_payload()}
 
 
 def _load_mist_token() -> str:
