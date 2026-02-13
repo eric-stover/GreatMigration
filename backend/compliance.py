@@ -271,7 +271,6 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
     payload = resp.json()
 
     rows: Sequence[Any]
-    payload_shape = type(payload).__name__
     if isinstance(payload, list):
         rows = payload
     elif isinstance(payload, Mapping):
@@ -279,23 +278,13 @@ def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
             candidate = payload.get(key)
             if isinstance(candidate, list):
                 rows = candidate
-                payload_shape = f"dict:{key}"
                 break
         else:
             rows = []
     else:
         rows = []
 
-    parsed_rows = [row for row in rows if isinstance(row, dict)]
-    logger.info(
-        "action=firmware_versions_response type=%s status=%s payload_shape=%s rows_total=%s rows_parsed=%s",
-        device_type,
-        getattr(resp, "status_code", "unknown"),
-        payload_shape,
-        len(rows),
-        len(parsed_rows),
-    )
-    return parsed_rows
+    return [row for row in rows if isinstance(row, dict)]
 
 
 

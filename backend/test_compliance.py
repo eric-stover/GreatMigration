@@ -484,33 +484,6 @@ def test_refresh_standards_accepts_paginated_payload(monkeypatch, tmp_path):
     assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
 
 
-def test_fetch_versions_for_type_logs_request_and_response(monkeypatch):
-    monkeypatch.setenv("MIST_TOKEN", "token")
-    monkeypatch.setenv("MIST_ORG_ID", "org-id")
-
-    class _Resp:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return []
-
-    messages = []
-
-    def _capture(msg, *args):
-        messages.append(msg % args if args else msg)
-
-    monkeypatch.setattr(compliance.requests, "get", lambda *args, **kwargs: _Resp())
-    monkeypatch.setattr(compliance.logger, "info", _capture)
-
-    compliance._fetch_versions_for_type("switch")
-
-    assert any("action=firmware_versions_request" in message for message in messages)
-    assert any("action=firmware_versions_response" in message for message in messages)
-
-
 def test_fetch_versions_for_type_accepts_dict_payload(monkeypatch):
     monkeypatch.setenv("MIST_TOKEN", "token")
     monkeypatch.setenv("MIST_ORG_ID", "org-id")
