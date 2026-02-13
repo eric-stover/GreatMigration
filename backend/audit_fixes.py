@@ -38,6 +38,9 @@ else:
 SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
     r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)[A-Z]{2}\d+$"
 )
+SPARE_SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
+    r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)SPARE$"
+)
 
 
 def _mist_headers(token: str) -> Dict[str, str]:
@@ -489,7 +492,14 @@ def _has_active_physical_switch_ports(value: Any, visited: Optional[Set[int]] = 
 
 
 def _propose_spare_switch_name(current_name: str) -> Optional[str]:
-    match = SWITCH_LOCATION_EXTRACT_PATTERN.match((current_name or "").strip())
+    raw_name = (current_name or "").strip()
+    normalized_name = re.sub(r"[^A-Za-z0-9]", "", raw_name).upper()
+
+    match = SWITCH_LOCATION_EXTRACT_PATTERN.match(raw_name)
+    if not match:
+        match = SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
+    if not match:
+        match = SPARE_SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
     if not match:
         return None
     candidate = f"{match.group('region')}{match.group('site')}MDFSPARE"
@@ -581,32 +591,32 @@ def _execute_set_spare_switch_role_action(
 
         current_name = str(device_doc.get("name") or "").strip()
         role_payload = {"role": "spare"}
-        compliant_name = True
-        if SWITCH_LLDPNAME_PATTERN is not None:
-            compliant_name = bool(current_name and SWITCH_LLDPNAME_PATTERN.fullmatch(current_name))
+
+        proposed_spare_name = _propose_spare_switch_name(current_name)
+        if not proposed_spare_name:
+            summary["failed"] += 1
+            summary["errors"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "reason": "Unable to derive a compliant spare-switch name from the current device name.",
+                }
+            )
+            summary["changes"].append(
+                {
+                    "device_id": target_switch_id,
+                    "device_name": device_name,
+                    "status": "failed",
+                    "reason": "Unable to derive a compliant spare-switch name from the current device name.",
+                }
+            )
+            results.append(summary)
+            totals["failed"] += 1
+            continue
+
         rename_to: Optional[str] = None
-        if not compliant_name:
-            rename_to = _propose_spare_switch_name(current_name)
-            if not rename_to:
-                summary["failed"] += 1
-                summary["errors"].append(
-                    {
-                        "device_id": target_switch_id,
-                        "device_name": device_name,
-                        "reason": "Unable to derive a compliant spare-switch name from the current device name.",
-                    }
-                )
-                summary["changes"].append(
-                    {
-                        "device_id": target_switch_id,
-                        "device_name": device_name,
-                        "status": "failed",
-                        "reason": "Unable to derive a compliant spare-switch name from the current device name.",
-                    }
-                )
-                results.append(summary)
-                totals["failed"] += 1
-                continue
+        if current_name != proposed_spare_name:
+            rename_to = proposed_spare_name
 
         payload = dict(role_payload)
         if rename_to:
