@@ -205,6 +205,7 @@ Both scripts read and reuse values in `backend/.env`, so follow-up runs only pro
    * Copy `.env.sample` to `backend/.env` and populate:
      * `MIST_TOKEN`
      * `SESSION_SECRET`
+     * `SESSION_HTTPS_ONLY` (recommended `true`; set to `false` only for local HTTP testing)
      * `AUTH_METHOD` (`local` or `ldap`)
      * For local auth: `LOCAL_USERS` and optional `LOCAL_PUSH_USERS`
      * For LDAP auth: `LDAP_SERVER_URL`, `LDAP_SEARCH_BASE`/`LDAP_SEARCH_BASES`, `LDAP_BIND_TEMPLATE`, `LDAP_SERVICE_DN`, `LDAP_SERVICE_PASSWORD`, plus `PUSH_GROUP_DN` and optional `READONLY_GROUP_DN`
@@ -259,7 +260,8 @@ Think of the backend as a set of small “helpers” that each do one job:
 ## Configuration reference
 
 * **Authentication & authorization**
-  * `AUTH_METHOD=local` uses users listed in `LOCAL_USERS` (`username:password`). Include comma-separated pairs and flag push-enabled accounts in `LOCAL_PUSH_USERS`.
+  * `AUTH_METHOD=local` uses users listed in `LOCAL_USERS` (`username:password`). Use strong, unique passwords and avoid defaults. Include comma-separated pairs and flag push-enabled accounts in `LOCAL_PUSH_USERS`.
+  * `SESSION_HTTPS_ONLY` defaults to `true` and should stay enabled in production so session cookies are not sent over plain HTTP.
   * `AUTH_METHOD=ldap` supports read-only (`READONLY_GROUP_DN`) and push-enabled (`PUSH_GROUP_DN`) directory groups. Multiple values can be separated by semicolons or newlines.
 * **Mist connectivity**
   * `MIST_BASE_URL` defaults to `https://api.ac2.mist.com`. Change it if your org lives in another Mist region.
