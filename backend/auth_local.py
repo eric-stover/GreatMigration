@@ -12,13 +12,14 @@ from logging_utils import get_user_logger
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(32)
+SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
 # LOCAL_USERS format: "user1:pass1,user2:pass2"
 README_URL = "https://github.com/jacob-hopkins/GreatMigration#readme"
 HELP_URL = os.getenv("HELP_URL", README_URL)
 
 
 def _load_users() -> Dict[str, str]:
-    raw = os.getenv("LOCAL_USERS", "admin:adminpass")
+    raw = os.getenv("LOCAL_USERS", "")
     users: Dict[str, str] = {}
     for pair in raw.split(","):
         if ":" in pair:
@@ -140,5 +141,5 @@ def me(user=Depends(current_user)):
 
 def install_auth(app):
     """Enable session auth routes."""
-    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=False)
+    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=SESSION_HTTPS_ONLY)
     app.include_router(router)

@@ -14,6 +14,7 @@ from logging_utils import get_user_logger
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_urlsafe(32)
+SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "true").strip().lower() in {"1", "true", "yes", "on"}
 LDAP_SERVER_URL = os.getenv("LDAP_SERVER_URL", "ldaps://dc01.testdomain.local:636")
 LDAP_SEARCH_BASE = os.getenv("LDAP_SEARCH_BASE", "DC=testdomain,DC=local")
 
@@ -292,7 +293,7 @@ def me(user = Depends(current_user)):
 def install_auth(app):
     """Call this from app.py to enable sessions + routes."""
     # Add SessionMiddleware if not already present
-    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=False)
+    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=SESSION_HTTPS_ONLY)
     app.include_router(router)
 
 __all__ = ["install_auth", "current_user", "require_push_rights"]
