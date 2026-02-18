@@ -247,6 +247,134 @@ def _save_firmware_standards_doc(doc: Dict[str, Any], path: Optional[Path] = Non
     tmp.replace(path)
 
 
+def _extract_inventory_models(payload: Any) -> Set[str]:
+    models: Set[str] = set()
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        model = row.get("model")
+        if not isinstance(model, str):
+            continue
+        normalized = model.strip()
+        if normalized:
+            models.add(normalized)
+    return models
+
+
+def _fetch_org_switch_models(token: str, base_url: str, org_id: str) -> Set[str]:
+    url = f"{base_url}/orgs/{org_id}/inventory/count"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"distinct": "model", "limit": 1000},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return _extract_inventory_models(resp.json())
+
+
+def _extract_switch_standard_one_versions(doc: Mapping[str, Any]) -> Dict[str, str]:
+    models = doc.get("models") if isinstance(doc.get("models"), Mapping) else {}
+    switch_rows = models.get("switch") if isinstance(models, Mapping) else {}
+    if not isinstance(switch_rows, Mapping):
+        return {}
+
+    versions: Dict[str, str] = {}
+    for model, entries in switch_rows.items():
+        if not isinstance(model, str) or not isinstance(entries, list) or not entries:
+            continue
+        first = entries[0]
+        if not isinstance(first, Mapping):
+            continue
+        raw_version = first.get("version")
+        if not isinstance(raw_version, str):
+            continue
+        version = raw_version.strip()
+        key = model.strip()
+        if key and version:
+            versions[key] = version
+    return versions
+
+
+def _sync_switch_auto_upgrade_custom_versions(doc: Mapping[str, Any]) -> None:
+    token = (os.getenv("MIST_TOKEN") or "").strip()
+    if not token:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_token")
+        return
+
+    base_url = _mist_api_base_url()
+    org_id = _resolve_mist_org_id(token, base_url)
+    if not org_id:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_org")
+        return
+
+    standard_one_by_model = _extract_switch_standard_one_versions(doc)
+    if not standard_one_by_model:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_standard_one_versions")
+        return
+
+    try:
+        org_models = _fetch_org_switch_models(token, base_url, org_id)
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=inventory_lookup error=%s", exc)
+        return
+
+    custom_versions = {
+        model: version
+        for model, version in standard_one_by_model.items()
+        if model in org_models
+    }
+    if not custom_versions:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=no_matching_org_models")
+        return
+
+    headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+    setting_url = f"{base_url}/orgs/{org_id}/setting"
+    try:
+        current_resp = requests.get(setting_url, headers=headers, timeout=30)
+        current_resp.raise_for_status()
+        current_payload = current_resp.json()
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=setting_lookup error=%s", exc)
+        return
+
+    switch_payload = current_payload.get("switch") if isinstance(current_payload, Mapping) else {}
+    auto_upgrade = switch_payload.get("auto_upgrade") if isinstance(switch_payload, Mapping) else {}
+    if isinstance(auto_upgrade, Mapping):
+        updated_auto_upgrade = dict(auto_upgrade)
+    else:
+        updated_auto_upgrade = {}
+    updated_auto_upgrade["custom_versions"] = custom_versions
+
+    put_payload = {"switch": {"auto_upgrade": updated_auto_upgrade}}
+    try:
+        put_resp = requests.put(setting_url, headers=headers, json=put_payload, timeout=30)
+        put_resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=setting_update error=%s", exc)
+        return
+
+    logger.info(
+        "action=switch_auto_upgrade_sync status=updated org_id=%s models=%s",
+        org_id,
+        len(custom_versions),
+    )
+
+
 
 
 def _mist_api_base_url() -> str:
@@ -490,6 +618,7 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
         logger.info("action=firmware_standards_refresh status=skipped reason=recent_cache")
         return doc
 
+    previous_standard_one = _extract_switch_standard_one_versions(doc)
     updated = copy.deepcopy(doc)
     models = updated.setdefault("models", {})
     sources = updated.setdefault("sources", {})
@@ -527,6 +656,9 @@ def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[s
 
     if any_changes:
         _save_firmware_standards_doc(updated, path)
+        new_standard_one = _extract_switch_standard_one_versions(updated)
+        if new_standard_one != previous_standard_one:
+            _sync_switch_auto_upgrade_custom_versions(updated)
         model_counts = {
             key: len(value) for key, value in models.items() if isinstance(value, Mapping)
         }

@@ -730,6 +730,97 @@ def test_refresh_preserves_existing_device_type_when_fetch_empty(monkeypatch, tm
     assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S5"
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.10000"
 
+def test_refresh_standards_syncs_org_switch_auto_upgrade_custom_versions(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    monkeypatch.setenv("MIST_TOKEN", "token")
+    monkeypatch.setenv("MIST_ORG_ID", "org-1")
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [
+                {"model": "EX2300", "version": "20.4R3-S5", "tags": ["junos_suggested"], "record_id": "1"},
+                {"model": "EX4100", "version": "22.1R1", "tags": ["junos_suggested"], "record_id": "2"},
+            ]
+        if device_type == "ap":
+            return []
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    put_calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def _fake_get(url, **kwargs):
+        if url.endswith('/orgs/org-1/inventory/count'):
+            return _Resp({"results": [{"model": "EX2300"}, {"model": "EX4100"}, {"model": "AP32"}]})
+        if url.endswith('/orgs/org-1/setting'):
+            return _Resp({"switch": {"auto_upgrade": {"enabled": True, "version": "stable"}}})
+        raise AssertionError(f'unexpected url {url}')
+
+    def _fake_put(url, **kwargs):
+        put_calls.append({"url": url, "json": kwargs.get("json")})
+        return _Resp({})
+
+    monkeypatch.setattr(compliance.requests, "get", _fake_get)
+    monkeypatch.setattr(compliance.requests, "put", _fake_put)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    assert len(put_calls) == 1
+    assert put_calls[0]["url"].endswith('/orgs/org-1/setting')
+    assert put_calls[0]["json"]["switch"]["auto_upgrade"]["enabled"] is True
+    assert put_calls[0]["json"]["switch"]["auto_upgrade"]["version"] == "stable"
+    assert put_calls[0]["json"]["switch"]["auto_upgrade"]["custom_versions"] == {
+        "EX2300": "20.4R3-S5",
+        "EX4100": "22.1R1",
+    }
+
+
+
+def test_refresh_standards_skips_switch_auto_upgrade_sync_when_standard_1_unchanged(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    standards_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2023-01-01T00:00:00Z",
+                "sources": {},
+                "models": {
+                    "switch": {"EX2300": [{"version": "20.4R3-S5"}]},
+                    "ap": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S5", "tags": ["junos_suggested"], "record_id": "1"}]
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    def _fail_sync(_doc):
+        raise AssertionError("sync should not run when Standard 1 has not changed")
+
+    monkeypatch.setattr(compliance, "_sync_switch_auto_upgrade_custom_versions", _fail_sync)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+
+
 def test_firmware_management_check_flags_unapproved_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standards.json"
     _write_standard_versions(standards_path, switch_versions=["20.4R3-S4", "22.1R1"], ap_versions=["16.0.2"])
