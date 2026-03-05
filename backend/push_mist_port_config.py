@@ -201,6 +201,10 @@ def evaluate_rule(when: Dict[str, Any], intf: Dict[str, Any]) -> bool:
         return True
     mode = (intf.get("mode") or "").lower()
     data_vlan   = int(intf["data_vlan"])   if intf.get("data_vlan")   is not None else None
+    if mode == "access" and data_vlan is None:
+        # Cisco access interfaces default to VLAN 1 when no explicit
+        # `switchport access vlan` statement exists.
+        data_vlan = 1
     voice_vlan  = int(intf["voice_vlan"])  if intf.get("voice_vlan")  is not None else None
     native_vlan = int(intf["native_vlan"]) if intf.get("native_vlan") is not None else None
     allowed_vlans_set  = set(_normalize_vlan_list(intf.get("allowed_vlans")))
