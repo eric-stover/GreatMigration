@@ -4919,6 +4919,7 @@ async def api_push_batch(
     lcm_cleanup_device_ids: Optional[str] = Form(None),
     stage_site_deployment: bool = Form(False),
     push_site_deployment: bool = Form(False),
+    force_preview: bool = Form(False),
 ) -> JSONResponse:
     """
     Batch push. Each row can specify: site_id, device_id, input_json (object),
@@ -4937,13 +4938,14 @@ async def api_push_batch(
     finalize_assignments = bool(finalize_assignments)
     remove_temp_config = bool(remove_temp_config)
     preserve_legacy_vlans = bool(preserve_legacy_vlans)
+    force_preview = bool(force_preview)
     effective_legacy_vlan_ids = _expand_vlan_id_set(preserve_legacy_vlans_extra, base=LEGACY_VLAN_IDS)
     site_selection_count = int(stage_site_deployment) + int(push_site_deployment)
     lcm_selection_count = int(apply_temp_config) + int(finalize_assignments) + int(remove_temp_config)
     site_actions_selected = stage_site_deployment or push_site_deployment
     lcm_actions_selected = bool(apply_temp_config or finalize_assignments or remove_temp_config)
 
-    preview_only = not (
+    preview_only = force_preview or not (
         push_site_deployment or finalize_assignments or remove_temp_config
     )
 
