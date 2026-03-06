@@ -5003,7 +5003,7 @@ async def api_push_batch(
                 status_code=400,
             )
 
-    should_push_live = push_site_deployment
+    should_push_live = push_site_deployment and not preview_only
     effective_dry_run = not should_push_live
 
     try:
