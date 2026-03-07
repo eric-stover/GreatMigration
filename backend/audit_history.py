@@ -54,6 +54,7 @@ class SiteHistory:
 
 LOG_TS_RE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
 AUDIT_MARKER = "action=audit_run"
+DAILY_LOG_NAME_RE = re.compile(r"^\d{8}$")
 
 
 def _parse_breakdown(raw: str) -> Dict[str, int]:
@@ -88,6 +89,8 @@ def _iter_recent_log_files(
 ) -> Iterable[Path]:
     cutoff_date = (now - timedelta(days=lookback_days)).date()
     for path in sorted(log_dir.glob("*.log")):
+        if not DAILY_LOG_NAME_RE.match(path.stem):
+            continue
         try:
             file_date = datetime.strptime(path.stem, "%d%m%Y").date()
         except ValueError:

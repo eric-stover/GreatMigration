@@ -247,7 +247,7 @@ def _collect_one_device(
     base_dir: Path,
     device: DeviceInput,
     username: str,
-    password: str,
+    password_bytes: bytes,
     delay_factor: float,
     read_timeout: int,
 ) -> DeviceResult:
@@ -263,7 +263,9 @@ def _collect_one_device(
     result.temp_files["directory"] = str(device_dir)
 
     conn = None
+    password: Optional[str] = None
     try:
+        password = password_bytes.decode("utf-8")
         params = {
             "device_type": "cisco_ios",
             "host": device.host,
@@ -382,6 +384,8 @@ def _collect_one_device(
                 conn.disconnect()
         except Exception:
             pass
+        finally:
+            password = None
 
 
 def start_job(
@@ -408,7 +412,6 @@ def start_job(
     _JOBS[job_id] = job
 
     def _run() -> None:
-        password = password_bytes.decode("utf-8")
         try:
             if not device_list:
                 with job._lock:
@@ -428,7 +431,7 @@ def start_job(
                         base_dir=base_dir,
                         device=device,
                         username=username,
-                        password=password,
+                        password_bytes=bytes(password_bytes),
                         delay_factor=delay_factor,
                         read_timeout=read_timeout,
                     )

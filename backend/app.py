@@ -5,6 +5,7 @@ import re
 import math
 import hashlib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -133,11 +134,6 @@ PAGE_COPY: dict[str, dict[str, str]] = {
     "config": {
         "title": "Config Conversion",
         "tagline": "Collect Cisco configs via SSH or upload files → map rows → batch test/push to Mist",
-    },
-    "audit": {
-        "title": "Compliance Audit",
-        "tagline": "Audit Mist sites for common configuration issues",
-        "menu_label": "Compliance Audit",
     },
     "audit": {
         "title": "Compliance Audit",
@@ -704,9 +700,8 @@ def _mist_get_json(
 def _list_sites(base_url: str, headers: Dict[str, str], org_id: Optional[str] = None) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     if org_id:
-        r = requests.get(f"{base_url}/orgs/{org_id}/sites", headers=headers, timeout=30)
-        r.raise_for_status()
-        for s in r.json() or []:
+        sites = _mist_get_json(base_url, headers, f"/orgs/{org_id}/sites") or []
+        for s in sites:
             if not isinstance(s, dict):
                 continue
             items.append(
@@ -1636,13 +1631,17 @@ def api_port_profiles(base_url: str = DEFAULT_BASE_URL, org_id: Optional[str] = 
 
         if template_id:
             org_ids = [org_id] if org_id else _discover_org_ids(base_url, headers)
-            for oid in org_ids:
-                try:
-                    items = _fetch_from_template(oid, template_id)
-                    if items:
-                        break
-                except Exception:
-                    continue
+            if org_ids:
+                with ThreadPoolExecutor(max_workers=min(8, len(org_ids))) as executor:
+                    futures = {executor.submit(_fetch_from_template, oid, template_id): oid for oid in org_ids}
+                    for future in as_completed(futures):
+                        try:
+                            candidate = future.result()
+                        except Exception:
+                            continue
+                        if candidate:
+                            items = candidate
+                            break
             if not items:
                 return JSONResponse(
                     {
@@ -1654,15 +1653,28 @@ def api_port_profiles(base_url: str = DEFAULT_BASE_URL, org_id: Optional[str] = 
         else:
             org_ids = [org_id] if org_id else _discover_org_ids(base_url, headers)
             seen: set[str] = set()
-            for oid in org_ids:
+
+            def _fetch_templates(oid: str) -> List[Dict[str, Any]]:
+                response = requests.get(
+                    f"{base_url}/orgs/{oid}/networktemplates",
+                    headers=headers,
+                    timeout=30,
+                )
+                response.raise_for_status()
+                return response.json() or []
+
+            template_docs: Dict[str, List[Dict[str, Any]]] = {}
+            with ThreadPoolExecutor(max_workers=min(8, max(1, len(org_ids)))) as executor:
+                futures = {executor.submit(_fetch_templates, oid): oid for oid in org_ids}
+                for future in as_completed(futures):
+                    oid = futures[future]
+                    try:
+                        template_docs[oid] = future.result()
+                    except Exception:
+                        continue
+
+            for oid, templates in template_docs.items():
                 try:
-                    r = requests.get(
-                        f"{base_url}/orgs/{oid}/networktemplates",
-                        headers=headers,
-                        timeout=30,
-                    )
-                    r.raise_for_status()
-                    templates = r.json() or []
                     for t in templates:
                         tid = t.get("id")
                         if not tid:

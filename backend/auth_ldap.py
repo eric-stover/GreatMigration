@@ -34,6 +34,7 @@ LDAP_SEARCH_BASES = _parse_search_bases(os.getenv("LDAP_SEARCH_BASES") or LDAP_S
 LDAP_BIND_TEMPLATE = os.getenv("LDAP_BIND_TEMPLATE", "{username}@testdomain.local")
 PUSH_GROUP_DN = os.getenv("PUSH_GROUP_DN")  # CN=NetAuto-Push,OU=Groups,...
 READONLY_GROUP_DNS = _parse_search_bases(os.getenv("READONLY_GROUP_DN"))
+LDAP_MATCHING_RULE_IN_CHAIN = os.getenv("LDAP_MATCHING_RULE_IN_CHAIN", "true").strip().lower() not in {"0", "false", "no", "off"}
 
 # Optional service account for searches
 LDAP_SERVICE_DN = os.getenv("LDAP_SERVICE_DN", "CN=GreatMigration,CN=Users,DC=testdomain,DC=local")
@@ -110,28 +111,78 @@ def _search_user(conn: Connection, username: str) -> Optional[Dict[str, Any]]:
 
 def _is_member_of_group(user_dn: str, group_dn: str, search_conn: Connection) -> bool:
     """
-    Recursive group check via LDAP_MATCHING_RULE_IN_CHAIN
+    Recursive group check with AD matching-rule support and generic LDAP fallback.
     """
-    # (memberOf:1.2.840.113556.1.4.1941:=<groupDN>) true if user is directly or indirectly a member
     escaped_user_dn = escape_filter_chars(user_dn)
     escaped_group_dn = escape_filter_chars(group_dn)
-    filt = (
-        "(&(distinguishedName="
-        f"{escaped_user_dn}"
-        ")(memberOf:1.2.840.113556.1.4.1941:="
-        f"{escaped_group_dn}"
-        "))"
-    )
-    for base in _iter_search_bases():
-        ok = search_conn.search(
-            search_base=base,
-            search_filter=filt,
-            search_scope=SUBTREE,
-            attributes=["distinguishedName"],
-            size_limit=1,
+
+    if LDAP_MATCHING_RULE_IN_CHAIN:
+        # (memberOf:1.2.840.113556.1.4.1941:=<groupDN>) true if user is directly or indirectly a member
+        filt = (
+            "(&(distinguishedName="
+            f"{escaped_user_dn}"
+            ")(memberOf:1.2.840.113556.1.4.1941:="
+            f"{escaped_group_dn}"
+            "))"
         )
-        if ok and search_conn.entries:
+        try:
+            for base in _iter_search_bases():
+                ok = search_conn.search(
+                    search_base=base,
+                    search_filter=filt,
+                    search_scope=SUBTREE,
+                    attributes=["distinguishedName"],
+                    size_limit=1,
+                )
+                if ok and search_conn.entries:
+                    return True
+        except Exception:
+            # Fallback to generic traversal below for non-AD directories.
+            pass
+
+    # Generic LDAP fallback: recursively follow memberOf references.
+    queue: List[str] = [user_dn]
+    visited: set[str] = set()
+    target = group_dn.strip().lower()
+
+    while queue:
+        current_dn = queue.pop(0).strip()
+        if not current_dn:
+            continue
+        key = current_dn.lower()
+        if key in visited:
+            continue
+        visited.add(key)
+        if key == target:
             return True
+
+        current_escaped = escape_filter_chars(current_dn)
+        group_filter = f"(distinguishedName={current_escaped})"
+        for base in _iter_search_bases():
+            try:
+                ok = search_conn.search(
+                    search_base=base,
+                    search_filter=group_filter,
+                    search_scope=SUBTREE,
+                    attributes=["memberOf", "distinguishedName"],
+                    size_limit=1,
+                )
+            except Exception:
+                continue
+            if not (ok and search_conn.entries):
+                continue
+            entry = search_conn.entries[0]
+            try:
+                parent_groups = [str(v) for v in getattr(entry, "memberOf").values]
+            except Exception:
+                parent_groups = []
+            for parent in parent_groups:
+                if parent.strip().lower() == target:
+                    return True
+                if parent.strip().lower() not in visited:
+                    queue.append(parent)
+            break
+
     return False
 
 def _html_login(error: Optional[str] = None) -> str:
