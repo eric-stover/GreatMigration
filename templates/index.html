@@ -388,6 +388,7 @@
     let sitesCache = []; // list of sites
     const devicesBySite = new Map(); // site_id -> devices[]
     let lcmCleanupSelectedIds = new Set();
+    let lcmStep3PreviewComplete = false;
     let sshCollectStartedAt = null;
     let sshCollectRequested = 0;
     const siteAutomationCheckboxes = [siteStage, sitePush].filter(Boolean);
@@ -403,11 +404,29 @@
       return !liveChangeCheckboxes.some(cb => cb && cb.checked);
     }
 
+    function isLcmStep3OnlySelected(){
+      return Boolean(removeTempConfig?.checked) && !applyTempConfig?.checked && !finalizeAssignments?.checked;
+    }
+
+    function isLcmStep3PreviewMode(){
+      return isLcmStep3OnlySelected() && !lcmStep3PreviewComplete;
+    }
+
+    function resetLcmStep3PreviewState(){
+      lcmStep3PreviewComplete = false;
+    }
+
     function syncPushBtnLabel(){
       const preview = isPreviewOnly();
+      const lcmStep3Preview = isLcmStep3PreviewMode();
+      const lcmStep3Apply = isLcmStep3OnlySelected() && lcmStep3PreviewComplete;
       const anySelected = siteAutomationCheckboxes.some(cb => cb && cb.checked) || lcmAutomationCheckboxes.some(cb => cb && cb.checked);
       if (!anySelected){
         pushBatchBtn.textContent = 'Run selected automation';
+      } else if (lcmStep3Preview){
+        pushBatchBtn.textContent = 'Preview Selected Automation';
+      } else if (lcmStep3Apply){
+        pushBatchBtn.textContent = 'Apply Configuration';
       } else if (preview){
         pushBatchBtn.textContent = 'Stage/test selected automation';
       } else {
@@ -417,7 +436,7 @@
 
     function syncBatchSectionVisibility(){
       if (!batchSection) return;
-      const lcmStep3Only = Boolean(removeTempConfig?.checked) && !applyTempConfig?.checked && !finalizeAssignments?.checked;
+      const lcmStep3Only = isLcmStep3OnlySelected();
       if (convertedItems.length || lcmStep3Only){
         show(batchSection);
       } else {
@@ -934,16 +953,20 @@
       selectAll.className = 'px-2 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800';
       selectAll.textContent = 'Select all';
       selectAll.addEventListener('click', () => {
+        resetLcmStep3PreviewState();
         lcmCleanupSelectedIds = new Set(devices.map(d => d.id).filter(Boolean));
         renderLcmCleanupDeviceList(siteId);
+        syncPushBtnLabel();
       });
       const clearAll = document.createElement('button');
       clearAll.type = 'button';
       clearAll.className = 'px-2 py-1 rounded border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800';
       clearAll.textContent = 'Clear';
       clearAll.addEventListener('click', () => {
+        resetLcmStep3PreviewState();
         lcmCleanupSelectedIds = new Set();
         renderLcmCleanupDeviceList(siteId);
+        syncPushBtnLabel();
       });
       controls.appendChild(selectAll);
       controls.appendChild(clearAll);
@@ -962,11 +985,13 @@
         checkbox.className = 'mt-0.5 h-4 w-4';
         checkbox.checked = lcmCleanupSelectedIds.has(device.id);
         checkbox.addEventListener('change', () => {
+          resetLcmStep3PreviewState();
           if (checkbox.checked) {
             lcmCleanupSelectedIds.add(device.id);
           } else {
             lcmCleanupSelectedIds.delete(device.id);
           }
+          syncPushBtnLabel();
         });
         const info = document.createElement('span');
         const detail = `${device.name || device.id}${device.model ? ` — ${device.model}` : ''}${device.type ? ` (${device.type})` : ''}`;
@@ -1365,7 +1390,7 @@
       renderPhaseStatus({});
 
       const siteAutomationActive = siteAutomationCheckboxes.some(cb => cb && cb.checked);
-      const lcmStep3Only = Boolean(removeTempConfig?.checked) && !applyTempConfig?.checked && !finalizeAssignments?.checked;
+      const lcmStep3Only = isLcmStep3OnlySelected();
       if (!lcmStep3Only){
         for (const r of rows){
           if (!r.site_id || !r.device_id){
@@ -1383,7 +1408,8 @@
       }
       if (pushBatchBtn.disabled) return;
 
-      const previewOnly = isPreviewOnly();
+      const lcmStep3PreviewOnly = isLcmStep3PreviewMode();
+      const previewOnly = isPreviewOnly() || lcmStep3PreviewOnly;
 
       const payloadRows = lcmStep3Only ? [] : rows.map(r => ({
         site_id: r.site_id,
@@ -1415,9 +1441,10 @@
       }
       form.append('stage_site_deployment', siteStage?.checked ? 'true' : 'false');
       form.append('push_site_deployment', sitePush?.checked ? 'true' : 'false');
+      form.append('force_preview', lcmStep3PreviewOnly ? 'true' : 'false');
 
       pushBatchBtn.disabled = true;
-      pushBatchBtn.textContent = previewOnly ? 'Staging…' : 'Applying…';
+      pushBatchBtn.textContent = lcmStep3PreviewOnly ? 'Previewing…' : (previewOnly ? 'Staging…' : 'Applying…');
 
       try {
         const res = await fetch('/api/push_batch', { method: 'POST', body: form });
@@ -1440,6 +1467,13 @@
 
         renderBatchResults(data.results || []);
         renderPhaseStatus(data.phase_status || {});
+
+        if (lcmStep3PreviewOnly){
+          const phase = data?.phase_status?.remove_temporary_config;
+          const failures = Array.isArray(phase?.failures) ? phase.failures : [];
+          lcmStep3PreviewComplete = Boolean(phase && (phase.ok || phase.skipped) && failures.length === 0);
+          syncPushBtnLabel();
+        }
 
       } catch (e){
         batchOutput.innerHTML = `
@@ -1534,6 +1568,7 @@
 
     lcmAutomationCheckboxes.forEach(cb => {
       cb?.addEventListener('change', () => {
+        resetLcmStep3PreviewState();
         updateAutomationLocks();
       });
     });
@@ -1542,14 +1577,20 @@
       setLcmStep3Expanded(Boolean(shouldExpand));
     });
     preserveLegacyVlans?.addEventListener('change', syncLegacyVlanExtras);
-    removeTempConfig?.addEventListener('change', syncLcmCleanupVisibility);
+    removeTempConfig?.addEventListener('change', () => {
+      resetLcmStep3PreviewState();
+      syncLcmCleanupVisibility();
+      syncPushBtnLabel();
+    });
     lcmCleanupSite?.addEventListener('change', async () => {
+      resetLcmStep3PreviewState();
       lcmCleanupSelectedIds = new Set();
       if (lcmCleanupSite?.value) {
         await renderLcmCleanupDeviceList(lcmCleanupSite.value);
       } else if (lcmCleanupDevices) {
         lcmCleanupDevices.textContent = 'Select a site to list switches.';
       }
+      syncPushBtnLabel();
     });
 
     // --- Init ---

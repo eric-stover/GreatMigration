@@ -38,6 +38,16 @@ def test_validate_rules_doc_accepts_allowed_vlans_condition():
     validate_rules_doc(doc)
 
 
+def test_evaluate_rule_treats_access_without_data_vlan_as_vlan_1():
+    intf = {
+        "mode": "access",
+        "description": "firewall mgmt",
+    }
+
+    assert evaluate_rule({"mode": "access", "data_vlan": 1}, intf) is True
+    assert evaluate_rule({"mode": "access", "data_vlan": 10}, intf) is False
+
+
 @pytest.mark.parametrize("value", [None, 42, {"invalid": True}])
 def test_validate_rules_doc_rejects_invalid_allowed_vlans(value):
     doc = {
