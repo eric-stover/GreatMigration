@@ -10,7 +10,7 @@ It started as a switch conversion utility and now provides a full web applicatio
 - Performing controlled, role-gated remediation actions.
 
 If you are a network engineer using this for the first time, the most important thing to know is:
-**GreatMigration is built around staged validation first, and destructive changes second.**
+**GreatMigration is built around staged validation first, and automated changes second.**
 Most workflows support non-destructive review before any push action is available.
 
 ---
