@@ -1,6 +1,17 @@
 # GreatMigration
 
-GreatMigration is a network automation toolkit designed to accelerate moves to Juniper Mist. The project grew from the Mist Switch Configuration Converter but now delivers a cohesive web application that helps engineers normalize legacy device data, validate Mist deployments, and remediate issues with a single click.
+GreatMigration is a network automation toolkit designed to accelerate migrations to Juniper Mist.
+It started as a switch conversion utility and now provides a full web application for:
+
+- Discovering legacy Cisco hardware and recommending replacements.
+- Converting Cisco switch configurations into Mist-compatible payloads.
+- Applying standardized port profile rules at scale.
+- Auditing Mist sites for compliance drift.
+- Performing controlled, role-gated remediation actions.
+
+If you are a network engineer using this for the first time, the most important thing to know is:
+**GreatMigration is built around staged validation first, and destructive changes second.**
+Most workflows support non-destructive review before any push action is available.
 
 ---
 
@@ -25,203 +36,196 @@ GreatMigration is a network automation toolkit designed to accelerate moves to J
 
 ## Feature overview
 
-GreatMigration ships with a responsive FastAPI + HTMX interface backed by a Mist-aware automation engine. All features honour Mist RBAC by granting “push” capabilities only to users in `PUSH_GROUP_DN` (or local users flagged via `LOCAL_PUSH_USERS`). Read-only users can still explore reports, download data, and stage conversion payloads.
+GreatMigration runs as a FastAPI web app with HTMX/Tailwind UI pages. Every operation is permission-aware:
+
+- **Read-only users** can inspect data, run audits, and export results.
+- **Push-enabled users** can execute change actions (Mist updates, 1 Click Fix, and push workflows).
+
+Push rights are controlled through `PUSH_GROUP_DN` (LDAP mode) or `LOCAL_PUSH_USERS` (local auth mode).
 
 ### Hardware conversion
 
-* Collect Cisco hardware details either by uploading `show tech-support` bundles **or** by letting the app log in over SSH.
-* Receive Juniper (or custom) replacement suggestions based on curated mappings.
-* Export a PDF summary for procurement or change records.
+The Hardware Conversion workflow helps you answer: **“What Juniper hardware should replace this Cisco estate?”**
+
+**What it does**
+
+- Accepts Cisco `show tech-support` uploads.
+- Or collects data over SSH directly from devices.
+- Parses chassis, module, optics, and interface detail.
+- Applies replacement mapping rules to suggest target Juniper models.
+- Exports results as PDF/CSV for procurement and change documentation.
 
 **How to use**
 
-1. Navigate to **Hardware Conversion** in the web UI.
-2. Choose one of the collection methods:
-   * **Upload bundle** – drag-and-drop a `show tech-support` archive (or browse to select one).
-   * **SSH collect** – provide the device IP/hostname plus credentials and start a job; the worker logs in and executes
-     `show inventory`, `show interface status`, `show interfaces`, and `show running-config`, then persists the raw text for auditing.
-3. Review the parsed chassis, line cards, and optics that appear in the results grid.
-4. Adjust suggested replacements if needed, then download the PDF report or CSV export for planning.
+1. Open **Hardware Conversion**.
+2. Choose input method:
+   - **Upload bundle** for existing `show tech-support` files.
+   - **SSH collect** to fetch inventory directly from switches.
+3. Review parsed inventory and replacement suggestions.
+4. Adjust mappings if needed (or update them in **Hardware Replacement Rules**).
+5. Export reports for CAB/procurement review.
 
 **How it works**
 
-* Uploads and SSH jobs both flow through `translate_showtech.parse_showtech`, which normalizes Cisco hardware tables and drives
-  the recommendation engine (`translate_showtech.load_mapping`, `find_copper_10g_ports`).
-* SSH collection is orchestrated by `backend/ssh_collect.py`: a thread pool launches Netmiko sessions per device, runs the
-  command set above, captures stdout to disk, and synthesizes a `show tech` bundle so the same parser can be reused.
-* Replacement suggestions are computed from `backend/device_map.sample.json` (or your customized `device_map.json`) and surfaced
-  alongside interface counts so you can spot copper-to-fiber mismatches before ordering hardware.
+- Parsing and normalization are handled by `translate_showtech.parse_showtech`.
+- Mapping is loaded through `translate_showtech.load_mapping` from `device_map.json` (or sample defaults).
+- SSH collection is orchestrated by `backend/ssh_collect.py`, which runs command collection jobs and stores raw outputs for traceability.
+- The same parser is used for upload and SSH sources, keeping results consistent regardless of intake method.
+
+**Safety notes**
+
+- Hardware conversion is an **analysis workflow** and does not push configuration to Mist.
+- You can run this safely before any migration window.
 
 ### Port profile rules
 
-* Maintain reusable mappings between detected Cisco interface traits and Mist port profiles.
-* Build rules with multiple conditions (mode, description regex, VLANs, etc.) using a drag-and-drop priority list.
-* Persist rule sets in `backend/port_rules.json` so they can be version-controlled or shared.
+Port Profile Rules provide deterministic logic for assigning Mist port usages from Cisco interface characteristics.
+
+**What it does**
+
+- Lets you define rule conditions such as mode, VLAN fields, and description regex.
+- Uses ordered evaluation (first match wins).
+- Stores rules in JSON for version control and reuse.
+- Applies rules automatically during conversion and push preview.
 
 **How to use**
 
-1. Open **Rules → Port Profiles** to see the existing rule stack.
-2. Click **Add rule** to describe the Cisco traits (mode, access VLAN, voice VLAN, native VLAN, description regex, etc.).
-3. Choose the Mist port usage that should be applied when a port matches the conditions.
-4. Reorder rules to set priority—first match wins during conversions.
-5. Use **Export JSON** to capture the current rule file or **Import JSON** to load a curated set into `backend/port_rules.json`.
+1. Open **Rules → Port Profiles**.
+2. Create or edit conditions (access/voice/native VLAN, trunk membership, description patterns).
+3. Set the target Mist `usage` value.
+4. Reorder rules to enforce priority.
+5. Export/import JSON to standardize policy across teams.
 
 **How it works**
 
-* Rules are stored in JSON and validated/loaded through `push_mist_port_config.load_rules` so malformed entries are rejected early.
-* During conversions the backend evaluates interfaces against each rule (`evaluate_rule`) using traits such as mode, access/voice
-  VLANs, native VLAN, allowed VLAN membership, and description/name regex matches; the first rule that returns `True` supplies
-  the target `usage`.
-* The matched usage is injected into the generated Mist `port_config` payloads before staging or pushing so rule tweaks immediately
-  impact both dry runs and live updates.
+- Rule files are validated via `push_mist_port_config.load_rules`.
+- Interface matching uses `evaluate_rule` logic in conversion/push flows.
+- The selected usage is injected into generated Mist `port_config` payloads.
+
+**Safety notes**
+
+- Rule updates do not change devices by themselves.
+- You can validate rule effects through stage/test workflows before any live push.
 
 ### Config conversion
 
-* Translate legacy switch configs into Mist-ready JSON payloads.
-* Batch map converted payloads to Mist sites and devices, tweak chassis member offsets, exclude uplinks, and override device models.
-* Stage configurations or push live updates using the Site Deployment Automation controls; push options require push rights.
+Config Conversion is the core migration path from Cisco CLI to Mist API payloads.
+
+**What it does**
+
+- Parses Cisco configs and builds Mist-ready `port_config` structures.
+- Supports batch row-to-site/device mapping.
+- Supports stack/chassis member remapping and uplink exclusion.
+- Supports Stage/Test (preview) and Push (live Mist update).
+- Includes lifecycle-oriented automation to move from temporary legacy layout toward final Juniper port state.
 
 **How to use**
 
-1. Visit **Config Conversion** and upload one or more Cisco configuration files (raw CLI or archive).
-2. Inspect the parsed inventory and optionally adjust offsets/exclusions so the converted members align with target hardware.
-3. Select the destination Mist org/site/device for each row. The UI displays the generated Mist payload preview.
-4. Use the **Site Deployment Automation** section:
-   * Choose **Stage/Test** to download the Mist payload or perform a dry run without changing devices.
-   * Choose **Push changes** to send the converted configuration to Mist (requires push permissions).
-5. Download the JSON or CSV exports for documentation or manual review at any stage.
+1. Open **Config Conversion**.
+2. Upload one or more Cisco config files (or collect files over SSH).
+3. Validate interface interpretation and member mapping.
+4. Assign Mist org/site/device targets for each row.
+5. Run **Stage/Test** first and review outputs.
+6. Run **Push changes** only after review and approval.
 
 **How it works**
 
-* File uploads flow through `convertciscotojson.convert_one_file`, which relies on `CiscoConfParse` to model every interface, infer
-  EX4100 member types, and translate Cisco naming into Mist FPC/port identifiers while preserving VLAN, PoE, QoS, and description
-  details.
-* Batch pushes reuse `_build_payload_for_row` inside `backend/app.py` to merge the converted `port_config` with Mist site/device
-  selections, apply rule-driven port usages, enforce capacity checks (`validate_port_config_against_model`), and PUT the results to
-  `/sites/{site_id}/devices/{device_id}`.
-* Lifecycle Management (LCM) automation lets Step 3 target a site and device list to remove the temporary Cisco layout, preserving
-  legacy VLANs while regenerating port assignments from live switch data for the final Juniper configuration.
+- Parsing is performed by `convertciscotojson.convert_one_file` with CiscoConfParse.
+- Payload construction merges conversion output, rule-driven usages, and selected Mist targets.
+- Capacity/model guardrails are enforced via validation helpers in `push_mist_port_config.py`.
+- Mist updates are executed through site/device API calls only when push workflows are explicitly triggered.
+
+**Safety notes**
+
+- Stage/Test is intended for pre-change validation and should be your default first step.
+- Push controls are hidden/blocked for read-only users.
+- Conversion output can be exported and peer-reviewed before any production change.
 
 ### Compliance audit & 1 Click Fix
 
-* Audit one or more Mist sites for required variables, device naming conventions, template adherence, documentation completeness, and configuration overrides.
-* Drill into site cards to see affected devices, override diffs, and remediation suggestions.
-* Take advantage of the following built-in 1 Click Fix actions (visible to push-enabled users):
-  * **Access point naming:** rename Mist APs to match the required pattern using LLDP neighbour data. Buttons appear per device so you can remediate selectively.
-  * **Switch static DNS cleanup:** remove statically configured management DNS servers from `ip_config` while respecting lab vs. production template assignments. Pre-checks verify the expected template and DNS site variables; buttons stay disabled and display guidance until prerequisites are met.
-* UI status badges show live Mist API feedback next to each button so operators immediately see success, skipped states, or pre-check failures.
+Compliance Audit checks deployed Mist state against your operational standards.
+
+**What it audits**
+
+- Naming compliance (switches/APs).
+- Required site variables.
+- Template alignment and drift.
+- Override cleanliness (including static DNS override cases).
+- Device documentation/image coverage thresholds.
+
+**Built-in 1 Click Fix actions**
+
+- **AP naming remediation** based on LLDP neighbor context.
+- **Switch static DNS cleanup** when template and variable prerequisites are met.
 
 **How to use**
 
-1. Open **Compliance Audit** and pick the Mist org and sites you want to evaluate.
-2. Click **Run audit** to fetch live Mist data and generate the compliance report.
-3. Expand each site card to review checks, affected devices, and recommended fixes.
-4. For push-enabled users, click the appropriate **1 Click Fix** buttons (e.g., AP rename, DNS cleanup). Each button re-validates prerequisites before issuing Mist API calls.
-5. Download the audit summary or device-level CSV exports for change records or further analysis.
+1. Open **Compliance Audit**.
+2. Select org/site scope.
+3. Run audit and inspect site cards/check summaries.
+4. Export CSV summaries for records.
+5. If authorized, run specific 1 Click Fix actions and monitor per-device status feedback.
 
 **How it works**
 
-* The audit engine (`backend/compliance.py`) hydrates a `SiteContext` with data from Mist site, derived setting, template, and device
-  APIs, then runs a library of `ComplianceCheck` subclasses to flag naming violations, missing variables, override drift, and
-  documentation gaps.
-* Devices are filtered to those seen online recently (default: last seen within 14 days) before checks run, so stale/offline
-  devices do not clutter the audit results.
-* Findings are serialized through `audit_history` so the UI can show site/device counts and let you export CSV snapshots for change
-  control.
-* 1 Click Fix actions map to helpers in `audit_fixes.py`/`audit_actions.py`; each button re-checks prerequisites, stages a dry run
-  when requested, and otherwise issues Mist REST calls (e.g., rename APs, clear DNS overrides) while streaming per-device status
-  back to the browser.
+- `compliance.py` builds site context from Mist API data and runs checks.
+- `audit_history.py` stores run history for review/export.
+- `audit_actions.py` defines available actions.
+- `audit_fixes.py` executes each action with prerequisite checks and API operations.
+
+**Safety notes**
+
+- Audit runs are read-only.
+- 1 Click Fix actions are explicit, per-action operations and remain permission-gated.
+- Preconditions are checked before actions are enabled or executed.
 
 ---
 
 ## Hamburger menu guide
 
-The hamburger menu (☰) is the primary navigation control across the app. It appears in the top-left of every main page (`/`, `/hardware`, `/replacements`, `/rules`, `/standards`, `/audit`) and opens a slide-out panel with all workflow links plus Help and Log out.
+The hamburger menu (☰) is the main navigation pattern across pages (`/`, `/hardware`, `/replacements`, `/rules`, `/standards`, `/audit`).
 
 ### How the menu behaves
 
-* **Open/close interaction**
-  * Click the ☰ button to open the left drawer.
-  * Click ☰ again to close it.
-  * Click anywhere outside the drawer to close it.
-* **Layout behavior**
-  * When open, the page content shifts right (`ml-64`) so the drawer does not cover working controls.
-  * The drawer is fixed-position and keeps the same width/site-wide styling across pages.
-* **Cross-page consistency**
-  * The same menu structure is rendered on login + all feature pages, so users can jump directly between workflows without “back” navigation.
+- Click ☰ to open/close.
+- Click outside the drawer to close.
+- Page content shifts when open so controls remain visible.
+- Menu structure is consistent across feature pages.
 
 ### User/session behavior in the menu
 
-* **Greeting + role hint**
-  * After page load, the UI calls `/me` and shows `Hey <username>!` in the menu.
-  * Read-only users are labeled `Hey <username>! (read-only)` on pages that enforce push restrictions.
-* **Log out visibility**
-  * The **Log out** button is hidden until a valid session is detected.
-  * Clicking **Log out** sends the user to `/logout` and clears the session cookie.
-* **Access model reminder**
-  * Menu visibility is broad, but action rights are enforced inside each workflow:
-    * Read-only users can navigate, inspect data, and run non-destructive operations.
-    * Push/fix operations require `can_push` rights (`PUSH_GROUP_DN` or `LOCAL_PUSH_USERS`).
+- The UI calls `/me` and displays the current username.
+- Read-only users are labeled as read-only where relevant.
+- Log out is shown for active sessions and clears session state via `/logout`.
+- Navigation visibility is broad, but mutating actions remain role-restricted.
 
 ### Menu items and what each one does
 
 1. **Hardware Conversion** (`/hardware`)
-   * Purpose: identify Juniper replacement hardware for existing Cisco inventory.
-   * Typical flow:
-     1. Upload a `show tech-support` file or run SSH hardware collection.
-     2. Review detected chassis/cards/optics and suggested replacements.
-     3. Export results for planning/procurement.
-
+   - Parse inventory and generate replacement recommendations.
 2. **Hardware Replacement Rules** (`/replacements`)
-   * Purpose: maintain the Cisco→Juniper replacement mapping table used by Hardware Conversion.
-   * Typical flow:
-     1. Review existing mappings.
-     2. Add/edit/remove model mappings.
-     3. Save and re-run Hardware Conversion to apply updated rules.
-
+   - Maintain Cisco→Juniper model mapping used by hardware conversion.
 3. **Config Conversion** (`/`)
-   * Purpose: convert Cisco running configs into Mist-ready payloads and run deployment automation.
-   * Typical flow:
-     1. Fetch configs via SSH or upload files.
-     2. Validate parsed output, mappings, and device/site assignments.
-     3. Run stage/test or push workflows depending on permissions.
-
+   - Convert configs and run stage/test/push workflows.
 4. **Port Profile Rules** (`/rules`)
-   * Purpose: define conditional logic that maps Cisco interface traits to Mist port profiles/usages.
-   * Typical flow:
-     1. Create rule conditions (mode, VLANs, regex, etc.).
-     2. Prioritize rules (first match wins).
-     3. Save/export/import `port_rules.json` sets and reuse during conversions.
-
+   - Define and prioritize interface-to-usage mapping logic.
 5. **Standards** (`/standards`)
-   * Purpose: view the firmware standards matrix by model/device type and recent revisions.
-   * Typical flow:
-     1. Open Standards to load the live standards table.
-     2. Filter by model, device type, or version.
-     3. Use this reference while planning conversions and compliance remediation.
-
+   - Review firmware standards by model/type and revision recency.
 6. **Compliance Audit** (`/audit`)
-   * Purpose: run site checks for naming, variable/template drift, and related policy issues.
-   * Typical flow:
-     1. Select target scope/site.
-     2. Run the audit and review findings.
-     3. Export reports and (if authorized) use 1 Click Fix actions.
-
+   - Run compliance checks and optional 1 Click Fix remediations.
 7. **Help** (`HELP_URL`)
-   * Purpose: open your internal runbook/documentation in a new browser tab.
-   * Setup:
-     * Set `HELP_URL` in `backend/.env`.
-     * If unset, the app falls back to the project README link.
+   - Open your internal runbook/documentation target.
 
 ### Recommended operator workflow using the menu
 
-1. Start in **Standards** to confirm target software baselines.
-2. Use **Hardware Replacement Rules** to confirm device mappings.
-3. Run **Hardware Conversion** and **Config Conversion** to stage outputs.
-4. Apply/verify **Port Profile Rules** before final push operations.
-5. Finish with **Compliance Audit** and only then apply fix/push actions.
+1. **Standards**: verify software baseline expectations.
+2. **Hardware Replacement Rules**: confirm model mapping policy.
+3. **Hardware Conversion**: size migration hardware.
+4. **Port Profile Rules**: validate interface policy translation.
+5. **Config Conversion**: run stage/test and review payloads.
+6. **Compliance Audit**: run post-stage checks, then apply fixes if needed.
 
-This sequence keeps the migration path deterministic: standards first, mapping second, conversion third, compliance and enforcement last.
+This sequence minimizes risk by moving from policy/reference -> conversion planning -> controlled execution.
 
 ---
 
@@ -229,14 +233,14 @@ This sequence keeps the migration path deterministic: standards first, mapping s
 
 ### Prerequisites
 
-* Git
-* Python 3.9+ with `python3-venv` (Linux/macOS) or the Windows Store/official installer
-* Mist API token with read access (for lookups) and write access (optional, required for pushes and 1 Click Fix actions)
-* Optional: PowerShell 5.1+ or PowerShell 7.x if you prefer the Windows script
+- Git
+- Python 3.9+ (`python3-venv` on Linux/macOS)
+- Mist API token (read for discovery; write for push/fix workflows)
+- Optional: PowerShell 5.1+ / 7.x for Windows quickstart
 
 ### Quick start scripts
 
-Two scripts provide identical setup behaviour so teams can use whichever platform is most convenient.
+GreatMigration includes both Python and PowerShell bootstrap scripts.
 
 #### Python (cross-platform)
 
@@ -246,130 +250,175 @@ cd ./GreatMigration
 python3 quickstart.py
 ```
 
-* Updates or clones the repository, builds `.venv`, installs backend dependencies, prompts for Mist credentials, creates `backend/.env`, ensures `backend/port_rules.json`, and starts `uvicorn`.
-* Re-run later with `python3 quickstart.py` to reuse cached settings.
-* Supply `--repo`, `--dir`, and `--branch` to bootstrap alternative locations; `--port` overrides the API port; `--no-start` performs setup without launching the API.
+What it does:
+
+- Clones/updates repo.
+- Builds `.venv` and installs backend dependencies.
+- Prompts for key settings and writes `backend/.env`.
+- Ensures `backend/port_rules.json` exists.
+- Starts `uvicorn` unless `--no-start` is set.
+
+Useful options:
+
+- `--repo`, `--dir`, `--branch`
+- `--port`
+- `--no-start`
 
 #### PowerShell (Windows-friendly)
 
 ```powershell
-# From a PowerShell prompt
 Set-ExecutionPolicy -Scope Process RemoteSigned
 ./quickstart.ps1 -RepoUrl https://github.com/ejstover/GreatMigration.git -TargetDir C:\GreatMigration
 ```
 
-* Mirrors the Python script: syncs the git repo, provisions `.venv`, installs requirements (bootstrapping `pip` if necessary), builds `backend/.env`, ensures `backend/port_rules.json`, and starts the API.
-* Supports `-Branch`, `-Port`, and `-NoStart` switches for parity with `quickstart.py`.
+What it does:
 
-Both scripts read and reuse values in `backend/.env`, so follow-up runs only prompt when settings are missing.
+- Mirrors Python quickstart behavior for Windows environments.
+- Includes pip/bootstrap handling where needed.
+- Supports `-Branch`, `-Port`, and `-NoStart` switches.
+
+Both scripts reuse previously saved `.env` values so repeat runs are fast and predictable.
 
 ### Manual setup
 
-1. **Clone and prepare the project**
+1. **Clone + install dependencies**
    ```bash
    git clone https://github.com/ejstover/GreatMigration.git
    cd GreatMigration
    python3 -m venv .venv
-   source .venv/bin/activate  # .\.venv\Scripts\activate on Windows
+   source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
    pip install -r backend/requirements.txt
    ```
-2. **Configure the backend**
-   * Copy `.env.sample` to `backend/.env` and populate:
-     * `MIST_TOKEN`
-     * `SESSION_SECRET`
-     * `SESSION_HTTPS_ONLY` (recommended `true`; set to `false` only for local HTTP testing)
-     * `AUTH_METHOD` (`local` or `ldap`)
-     * For local auth: `LOCAL_USERS` and optional `LOCAL_PUSH_USERS`
-     * For LDAP auth: `LDAP_SERVER_URL`, `LDAP_SEARCH_BASE`/`LDAP_SEARCH_BASES`, `LDAP_BIND_TEMPLATE`, `LDAP_SERVICE_DN`, `LDAP_SERVICE_PASSWORD`, plus `PUSH_GROUP_DN` and optional `READONLY_GROUP_DN`
-     * Optional defaults: `MIST_BASE_URL`, `MIST_ORG_ID`, `SWITCH_TEMPLATE_ID`, `API_PORT`, `HELP_URL`
-     * Compliance tuning: `SWITCH_NAME_REGEX_PATTERN`, `AP_NAME_REGEX_PATTERN`, `MIST_SITE_VARIABLES`, `SW_NUM_IMG`, `AP_NUM_IMG`
-     * Device catalog sources: `NETBOX_DT_URL`, `NETBOX_LOCAL_DT`
-     * Logging: `SYSLOG_HOST`, `SYSLOG_PORT`
-3. **Optional assets** – copy `backend/port_rules.sample.json` to `backend/port_rules.json` to maintain custom mappings outside version control.
-4. **Launch the API**
+
+2. **Create `backend/.env`**
+   Required core values:
+   - `MIST_TOKEN`
+   - `SESSION_SECRET`
+   - `AUTH_METHOD=local` or `AUTH_METHOD=ldap`
+
+   Common optional values:
+   - `MIST_BASE_URL`, `MIST_ORG_ID`, `SWITCH_TEMPLATE_ID`, `API_PORT`, `HELP_URL`
+   - `SESSION_HTTPS_ONLY=true` (recommended for production)
+
+   Local auth settings:
+   - `LOCAL_USERS`
+   - `LOCAL_PUSH_USERS` (optional)
+
+   LDAP settings:
+   - `LDAP_SERVER_URL`
+   - `LDAP_SEARCH_BASE` or `LDAP_SEARCH_BASES`
+   - `LDAP_BIND_TEMPLATE` or service bind settings
+   - `PUSH_GROUP_DN`, optional `READONLY_GROUP_DN`
+
+3. **Optional policy/config files**
+   - Copy `backend/port_rules.sample.json` to `backend/port_rules.json`.
+   - Copy `backend/device_map.sample.json` to `backend/device_map.json` for custom hardware mappings.
+   - Copy `backend/replacement_rules.sample.json` to `backend/replacement_rules.json` if using customized replacement logic.
+
+4. **Run the app**
    ```bash
    uvicorn app:app --host 0.0.0.0 --port 8000 --app-dir backend --reload
    ```
 
----
-
 ### First-run checklist
 
-1. Open a browser to `http://localhost:8000` (or the port you configured).
-2. Log in with a local account (`AUTH_METHOD=local`) or your LDAP account (`AUTH_METHOD=ldap`).
-3. Use the hamburger menu to pick your workflow (Hardware Conversion, Config Conversion, etc.).
-4. Start with a non-destructive “Stage/Test” or “Run audit” step before enabling push actions.
+1. Open `http://localhost:8000`.
+2. Confirm authentication works with your chosen auth method.
+3. Validate read-only user behavior first.
+4. Run non-destructive workflows (hardware parse, stage/test, compliance audit).
+5. Execute push/fix operations only after review and approval.
 
 ---
 
 ## Extras: LDAP, syslog, and logging
 
-* **LDAP integration (optional)** – set `AUTH_METHOD=ldap` and supply your server + group DNs in `backend/.env`. Users in `PUSH_GROUP_DN` can push changes; users in `READONLY_GROUP_DN` can still view reports without modifying Mist.
-* **Syslog export (optional)** – set `SYSLOG_HOST` and `SYSLOG_PORT` to forward user action logs to your syslog collector. If syslog is unreachable, file logging still continues locally.
-* **Local logging (default)** – user actions are written to daily log files in `backend/logs/` (one file per day) so you have an audit trail even without syslog.
+- **LDAP auth (optional)**
+  - Set `AUTH_METHOD=ldap` and directory settings.
+  - Group-based role control separates read-only and push users.
+
+- **Syslog forwarding (optional)**
+  - Set `SYSLOG_HOST` and `SYSLOG_PORT`.
+  - If syslog is unavailable, local logging continues.
+
+- **Local audit logging (default)**
+  - Action logs are written under `backend/logs/` for operational traceability.
 
 ---
 
 ## Backend Python components
 
-Think of the backend as a set of small “helpers” that each do one job:
-
-* `backend/app.py` – the FastAPI web server. It serves the UI, handles uploads, calls the conversion tools, and talks to Mist.
-* `backend/convertciscotojson.py` – reads Cisco configs and turns them into Mist-friendly JSON.
-* `backend/push_mist_port_config.py` – validates, builds, and pushes port configuration payloads to Mist.
-* `backend/translate_showtech.py` – parses `show tech-support` files to extract hardware and interface details.
-* `backend/ssh_collect.py` – logs into switches over SSH and collects the raw Cisco outputs the app needs.
-* `backend/compliance.py` – runs the compliance checks for naming, templates, variables, and documentation.
-* `backend/audit_actions.py` – defines which “1 Click Fix” buttons exist and how they are identified.
-* `backend/audit_fixes.py` – performs the actual fix actions (like renaming APs or cleaning DNS overrides).
-* `backend/audit_history.py` – saves and loads audit runs so the UI can show summaries and exports.
-* `backend/auth_local.py` – handles username/password login when you use local accounts.
-* `backend/auth_ldap.py` – handles LDAP login and group lookups.
-* `backend/logging_utils.py` – writes user action logs to files and (optionally) syslog.
+- `backend/app.py`: FastAPI server, endpoints, session/auth checks, and orchestration.
+- `backend/convertciscotojson.py`: Cisco config parser and Mist payload builder.
+- `backend/push_mist_port_config.py`: Rule evaluation, payload validation, and push helpers.
+- `backend/translate_showtech.py`: Show-tech parsing and hardware mapping helpers.
+- `backend/ssh_collect.py`: Multi-device SSH intake pipeline.
+- `backend/compliance.py`: Compliance check framework and site-level runners.
+- `backend/audit_actions.py`: Catalog of available remediation actions.
+- `backend/audit_fixes.py`: Execution logic for remediation actions.
+- `backend/audit_history.py`: Persistence and retrieval for audit history.
+- `backend/auth_local.py`: Local auth logic.
+- `backend/auth_ldap.py`: LDAP auth and group resolution.
+- `backend/logging_utils.py`: File/syslog user action logging.
 
 ---
 
 ## Configuration reference
 
-* **Authentication & authorization**
-  * `AUTH_METHOD=local` uses users listed in `LOCAL_USERS` (`username:password`). Use strong, unique passwords and avoid defaults. Include comma-separated pairs and flag push-enabled accounts in `LOCAL_PUSH_USERS`.
-  * `SESSION_HTTPS_ONLY` defaults to `true` and should stay enabled in production so session cookies are not sent over plain HTTP.
-  * `AUTH_METHOD=ldap` supports read-only (`READONLY_GROUP_DN`) and push-enabled (`PUSH_GROUP_DN`) directory groups. Multiple values can be separated by semicolons or newlines.
-* **Mist connectivity**
-  * `MIST_BASE_URL` defaults to `https://api.ac2.mist.com`. Change it if your org lives in another Mist region.
-  * `MIST_ORG_ID`, `SWITCH_TEMPLATE_ID`, and `API_PORT` can be pre-filled to streamline onboarding.
-* **Compliance checks**
-  * Override naming patterns via `SWITCH_NAME_REGEX_PATTERN` / `AP_NAME_REGEX_PATTERN`.
-  * Adjust required site variables with `MIST_SITE_VARIABLES`. Use `key=value` entries (for example, `hubDNSserver1=10.0.0.53`) to supply environment defaults that the 1 Click Fix action can apply automatically when a site is missing values.
-  * Enforce device documentation photo counts with `SW_NUM_IMG` and `AP_NUM_IMG`.
-  * Firmware standards for compliance are read from `backend/standard_fw_versions.json`. The app pulls suggested switch/AP versions from Mist on first run (or whenever the file has no stored versions), then refreshes every 90 days when `MIST_TOKEN` and `MIST_ORG_ID` are configured.
-* **1 Click Fix safeguards**
-  * AP rename actions derive new names from switch LLDP neighbours. Sites lacking neighbour data will surface actionable warnings but skip changes.
-  * Switch DNS cleanup actions verify the applied template (`Prod - Standard Template` for production sites, `Lab` template for lab sites) and the presence of `siteDNSserver`, `hubDNSserver1`, and `hubDNSserver2`. Buttons remain disabled until both checks pass and are annotated with details describing any failures.
+### Authentication and roles
+
+- `AUTH_METHOD=local` uses `LOCAL_USERS` (`username:password` list).
+- `AUTH_METHOD=ldap` uses LDAP bind/search plus group DNs.
+- Push rights come from `PUSH_GROUP_DN` (LDAP) or `LOCAL_PUSH_USERS` (local).
+- `SESSION_HTTPS_ONLY=true` is strongly recommended in production.
+
+### Mist connectivity
+
+- `MIST_BASE_URL` defaults to the AC2 Mist API domain.
+- `MIST_TOKEN` is required for Mist API access.
+- `MIST_ORG_ID` can be preset for faster operator workflows.
+
+### Compliance policy tuning
+
+- Naming patterns: `SWITCH_NAME_REGEX_PATTERN`, `AP_NAME_REGEX_PATTERN`.
+- Required variables: `MIST_SITE_VARIABLES` (`key=value` entries).
+- Documentation minimums: `SW_NUM_IMG`, `AP_NUM_IMG`.
+- Standards cache/source behavior uses `backend/standard_fw_versions.json` with periodic refresh.
+
+### VLAN/reserved behavior for conversion safety
+
+- `LEGACY_VLANS` identifies VLANs preserved in legacy/staged workflows.
+- `EXCLUDE_VLANS` omits specific VLANs from generated outputs.
+- `RESERVED_VLANS` protects reserved IDs with explicit naming (format `id:name`).
+
+### 1 Click Fix safeguards
+
+- AP rename actions depend on LLDP-derived context and skip when required data is missing.
+- DNS cleanup actions validate template and site-variable prerequisites before enabling execution.
 
 ---
 
 ## Firewall requirements
 
-Allow the following flows if your environment restricts outbound traffic:
+Allow these flows in controlled environments:
 
 | Direction | Protocol/Port | Destination | Purpose |
 |-----------|---------------|-------------|---------|
-| Inbound   | TCP `API_PORT` (8000 by default) | Admin workstations | Reach the GreatMigration web UI. Adjust if `API_PORT` is changed. |
-| Outbound  | TCP 443 | `api.ac2.mist.com` (or your regional Mist API host) | Fetch inventory, perform 1 Click Fix actions, push configurations. |
-| Outbound  | TCP 443 | `api.github.com` (and any custom `NETBOX_DT_URL`) | Download device type metadata referenced during conversions. |
-| Outbound  | TCP 22  | Managed switches | Allow the automation engine to initiate SSH sessions when executing configuration pushes or validation steps. |
-| Outbound† | TCP 389 / 636 | LDAP / Active Directory servers | Needed only when `AUTH_METHOD=ldap`. |
+| Inbound   | TCP `API_PORT` (default 8000) | Admin/operator workstations | Access the web UI. |
+| Outbound  | TCP 443 | Mist API endpoint (`api.ac2.mist.com` or regional host) | Read inventory, run audits/fixes, and perform pushes. |
+| Outbound  | TCP 443 | `api.github.com` and optional `NETBOX_DT_URL` | Pull device type metadata used in conversion workflows. |
+| Outbound  | TCP 22 | Managed switches | SSH collection and SSH-driven network workflows. |
+| Outbound* | TCP 389/636 | LDAP/AD servers | Required only when using LDAP auth. |
 
-†Use the secure port declared in `LDAP_SERVER_URL` (e.g., 636 for LDAPS).
+*Use LDAPS (`636`) whenever possible.
 
 ---
 
 ## Operational tips
 
-* **Role-based controls** – buttons that modify Mist (push, 1 Click Fix) only appear for users in the push group. Read-only users can still download reports and review findings.
-* **Dry runs first** – compliance actions report their intended changes before applying them, and the Site Deployment automation flow offers a dedicated Stage/Test option for safe validation.
-* **Troubleshooting** – review `backend/logs/app.log` (when syslog forwarding is not configured) and inspect Mist audit logs for confirmation of pushed changes.
-* **Staying current** – re-run either quick start script periodically; both update the git checkout, dependencies, and `.env` defaults while preserving custom settings.
+- **Start read-only**: validate inventory, rules, and audits before allowing push access.
+- **Use stage/test first**: treat push as a final approved step, not the first step.
+- **Keep policy files version-controlled**: `port_rules.json`, `device_map.json`, and related mappings.
+- **Review logs after every change window**: local logs and Mist audit logs should agree.
+- **Re-run quickstart periodically**: this updates dependencies and keeps local setup aligned.
 
-Enjoy building faster Juniper Mist migrations!
+GreatMigration is designed to reduce migration risk by making change intent visible, reviewable, and role-controlled.
