@@ -19,3 +19,6 @@ backend/port_rules.json
 backend/device_map.json
 # Local hardware replacement rules
 backend/replacement_rules.json
+
+# Local standard firmware versions
+backend/standard_fw_versions.json

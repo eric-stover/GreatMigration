@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 import os
 import re
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+
+import requests
 
 from audit_actions import (
     AP_RENAME_ACTION_ID,
@@ -17,6 +22,10 @@ from audit_actions import (
     SET_SITE_VARIABLES_ACTION_ID,
     SET_SPARE_SWITCH_ROLE_ACTION_ID,
 )
+from logging_utils import get_user_logger
+
+
+logger = get_user_logger()
 
 
 @dataclass
@@ -174,6 +183,543 @@ def _load_version_list_from_env(var_name: str) -> Tuple[str, ...]:
         return ()
     values = [item.strip() for item in raw.split(",")]
     return tuple(value for value in values if value)
+
+
+FIRMWARE_REFRESH_DAYS = 90
+SUGGESTED_FIRMWARE_TAG = "junos_suggested"
+
+
+def _firmware_standards_path() -> Path:
+    return Path(__file__).resolve().parent / "standard_fw_versions.json"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso8601(raw: Any) -> Optional[datetime]:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_firmware_standards_doc(path: Optional[Path] = None) -> Dict[str, Any]:
+    path = path or _firmware_standards_path()
+    if not path.exists():
+        return {
+            "generated_at": None,
+            "sources": {},
+            "models": {"switch": {}, "ap": {}},
+        }
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "generated_at": None,
+            "sources": {},
+            "models": {"switch": {}, "ap": {}},
+        }
+    if not isinstance(raw, dict):
+        return {
+            "generated_at": None,
+            "sources": {},
+            "models": {"switch": {}, "ap": {}},
+        }
+    return raw
+
+
+def _save_firmware_standards_doc(doc: Dict[str, Any], path: Optional[Path] = None) -> None:
+    path = path or _firmware_standards_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc["generated_at"] = _utc_now().isoformat().replace("+00:00", "Z")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(doc, handle, indent=2)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def _extract_inventory_models(payload: Any) -> Set[str]:
+    models: Set[str] = set()
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        model = row.get("model")
+        if not isinstance(model, str):
+            continue
+        normalized = model.strip()
+        if normalized:
+            models.add(normalized)
+    return models
+
+
+def _fetch_org_switch_models(token: str, base_url: str, org_id: str) -> Set[str]:
+    url = f"{base_url}/orgs/{org_id}/inventory/count"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"distinct": "model", "limit": 1000},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return _extract_inventory_models(resp.json())
+
+
+def _extract_switch_standard_one_versions(doc: Mapping[str, Any]) -> Dict[str, str]:
+    models = doc.get("models") if isinstance(doc.get("models"), Mapping) else {}
+    switch_rows = models.get("switch") if isinstance(models, Mapping) else {}
+    if not isinstance(switch_rows, Mapping):
+        return {}
+
+    versions: Dict[str, str] = {}
+    for model, entries in switch_rows.items():
+        if not isinstance(model, str) or not isinstance(entries, list) or not entries:
+            continue
+        first = entries[0]
+        if not isinstance(first, Mapping):
+            continue
+        raw_version = first.get("version")
+        if not isinstance(raw_version, str):
+            continue
+        version = raw_version.strip()
+        key = model.strip()
+        if key and version:
+            versions[key] = version
+    return versions
+
+
+def _sync_switch_auto_upgrade_custom_versions(doc: Mapping[str, Any]) -> None:
+    token = (os.getenv("MIST_TOKEN") or "").strip()
+    if not token:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_token")
+        return
+
+    base_url = _mist_api_base_url()
+    org_id = _resolve_mist_org_id(token, base_url)
+    if not org_id:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_org")
+        return
+
+    standard_one_by_model = _extract_switch_standard_one_versions(doc)
+    if not standard_one_by_model:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=missing_standard_one_versions")
+        return
+
+    try:
+        org_models = _fetch_org_switch_models(token, base_url, org_id)
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=inventory_lookup error=%s", exc)
+        return
+
+    custom_versions = {
+        model: version
+        for model, version in standard_one_by_model.items()
+        if model in org_models
+    }
+    if not custom_versions:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=no_matching_org_models")
+        return
+
+    headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
+    setting_url = f"{base_url}/orgs/{org_id}/setting"
+    try:
+        current_resp = requests.get(setting_url, headers=headers, timeout=30)
+        current_resp.raise_for_status()
+        current_payload = current_resp.json()
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=setting_lookup error=%s", exc)
+        return
+
+    switch_payload = current_payload.get("switch") if isinstance(current_payload, Mapping) else {}
+    auto_upgrade = switch_payload.get("auto_upgrade") if isinstance(switch_payload, Mapping) else {}
+    if isinstance(auto_upgrade, Mapping):
+        updated_auto_upgrade = dict(auto_upgrade)
+    else:
+        updated_auto_upgrade = {}
+    updated_auto_upgrade["custom_versions"] = custom_versions
+
+    put_payload = {"switch": {"auto_upgrade": updated_auto_upgrade}}
+    try:
+        put_resp = requests.put(setting_url, headers=headers, json=put_payload, timeout=30)
+        put_resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("action=switch_auto_upgrade_sync status=failed reason=setting_update error=%s", exc)
+        return
+
+    logger.info(
+        "action=switch_auto_upgrade_sync status=updated org_id=%s models=%s",
+        org_id,
+        len(custom_versions),
+    )
+
+
+
+
+def _mist_api_base_url() -> str:
+    raw = (os.getenv("MIST_BASE_URL") or "https://api.ac2.mist.com").strip().rstrip("/")
+    if not raw:
+        raw = "https://api.ac2.mist.com"
+    if raw.endswith("/api/v1"):
+        return raw
+    return f"{raw}/api/v1"
+
+
+_MIST_ORG_ID_CACHE: Optional[str] = None
+
+
+def _resolve_mist_org_id(token: str, base_url: str) -> Optional[str]:
+    configured_org_id = (os.getenv("MIST_ORG_ID") or "").strip()
+    if configured_org_id:
+        return configured_org_id
+
+    global _MIST_ORG_ID_CACHE
+    if _MIST_ORG_ID_CACHE:
+        return _MIST_ORG_ID_CACHE
+
+    whoami_url = f"{base_url}/self"
+    logger.info("action=mist_self_discovery url=%s", whoami_url)
+    try:
+        resp = requests.get(
+            whoami_url,
+            headers={"Authorization": f"Token {token}"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("action=mist_self_discovery status=failed error=%s", exc)
+        return None
+
+    payload = resp.json()
+    if not isinstance(payload, Mapping):
+        logger.warning("action=mist_self_discovery status=failed reason=unexpected_payload")
+        return None
+
+    discovered_org_id = payload.get("org_id")
+    if not isinstance(discovered_org_id, str) or not discovered_org_id.strip():
+        logger.warning("action=mist_self_discovery status=failed reason=missing_org_id")
+        return None
+
+    _MIST_ORG_ID_CACHE = discovered_org_id.strip()
+    logger.info("action=mist_self_discovery status=resolved")
+    return _MIST_ORG_ID_CACHE
+
+
+def _fetch_org_site_ids(token: str, base_url: str, org_id: str) -> List[str]:
+    url = f"{base_url}/orgs/{org_id}/sites"
+    logger.info("action=mist_sites_discovery url=%s", url)
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    site_ids: List[str] = []
+    seen: Set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        raw_site_id = row.get("id")
+        if not isinstance(raw_site_id, str):
+            continue
+        site_id = raw_site_id.strip()
+        if not site_id or site_id in seen:
+            continue
+        seen.add(site_id)
+        site_ids.append(site_id)
+    return site_ids
+
+
+def _fetch_site_versions_for_type(token: str, base_url: str, site_id: str, device_type: str) -> List[Dict[str, Any]]:
+    url = f"{base_url}/sites/{site_id}/devices/versions"
+    logger.info("action=firmware_versions_request scope=site type=%s site_id=%s url=%s", device_type, site_id, url)
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"type": device_type},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _fetch_versions_for_type(device_type: str) -> List[Dict[str, Any]]:
+    token = (os.getenv("MIST_TOKEN") or "").strip()
+    base = _mist_api_base_url()
+    org_id = _resolve_mist_org_id(token, base) if token else None
+    if not token or not org_id:
+        logger.info(
+            "action=firmware_versions_request type=%s status=skipped reason=missing_mist_env token_present=%s org_present=%s",
+            device_type,
+            bool(token),
+            bool(org_id),
+        )
+        return []
+    url = f"{base}/orgs/{org_id}/devices/versions"
+    logger.info("action=firmware_versions_request type=%s url=%s", device_type, url)
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Token {token}"},
+        params={"type": device_type},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    rows: Sequence[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, Mapping):
+        for key in ("results", "items", "data"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                rows = candidate
+                break
+        else:
+            rows = []
+    else:
+        rows = []
+
+    filtered_rows = [row for row in rows if isinstance(row, dict)]
+    if filtered_rows or device_type != "ap":
+        return filtered_rows
+
+    # AP version catalogs are sometimes empty at the org endpoint; fallback to site-level catalogs.
+    try:
+        site_ids = _fetch_org_site_ids(token, base, org_id)
+    except requests.RequestException:
+        return filtered_rows
+
+    merged_rows: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, Any, Any]] = set()
+    for site_id in site_ids:
+        try:
+            site_rows = _fetch_site_versions_for_type(token, base, site_id, device_type)
+        except requests.RequestException:
+            continue
+        for row in site_rows:
+            key = (
+                str(row.get("model") or "").strip(),
+                row.get("version"),
+                row.get("record_id"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_rows.append(row)
+    return merged_rows
+
+
+
+
+def _standards_doc_has_versions(doc: Mapping[str, Any]) -> bool:
+    models = doc.get("models") if isinstance(doc.get("models"), Mapping) else None
+    if not isinstance(models, Mapping):
+        return False
+    for device_type in ("switch", "ap"):
+        type_blob = models.get(device_type)
+        if not isinstance(type_blob, Mapping):
+            continue
+        for entries in type_blob.values():
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if not isinstance(item, Mapping):
+                    continue
+                version = item.get("version")
+                if isinstance(version, str) and version.strip():
+                    return True
+    return False
+
+
+def _row_matches_standard_firmware_filter(row: Mapping[str, Any], device_type: str) -> bool:
+    if device_type == "ap":
+        tag = row.get("tag")
+        return isinstance(tag, str) and tag.strip().lower() == "alpha"
+
+    tags = row.get("tags")
+    normalized_tags: Set[str] = set()
+    if isinstance(tags, list):
+        normalized_tags = {str(tag).strip().lower() for tag in tags if str(tag).strip()}
+    elif isinstance(tags, str):
+        normalized_tags = {part.strip().lower() for part in tags.split(",") if part.strip()}
+
+    return SUGGESTED_FIRMWARE_TAG.lower() in normalized_tags
+
+
+def _sanitize_standard_firmware_entry(row: Mapping[str, Any]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    for key, value in row.items():
+        if key == "_version":
+            continue
+        sanitized[key] = value
+    return sanitized
+
+def _refresh_firmware_standards_if_needed(path: Optional[Path] = None) -> Dict[str, Any]:
+    path = path or _firmware_standards_path()
+    logger.info("action=firmware_standards_refresh path=%s", path)
+    doc = _load_firmware_standards_doc(path)
+    generated_at = _parse_iso8601(doc.get("generated_at"))
+    has_versions = _standards_doc_has_versions(doc)
+    if generated_at is not None and has_versions and (_utc_now() - generated_at) < timedelta(days=FIRMWARE_REFRESH_DAYS):
+        logger.info("action=firmware_standards_refresh status=skipped reason=recent_cache")
+        return doc
+
+    previous_standard_one = _extract_switch_standard_one_versions(doc)
+    updated = copy.deepcopy(doc)
+    models = updated.setdefault("models", {})
+    sources = updated.setdefault("sources", {})
+    any_changes = False
+    for device_type in ("switch", "ap"):
+        try:
+            rows = _fetch_versions_for_type(device_type)
+        except requests.RequestException:
+            continue
+        by_model: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            model = row.get("model")
+            version = row.get("version")
+            if not isinstance(model, str) or not model.strip() or not isinstance(version, str) or not version.strip():
+                continue
+            if not _row_matches_standard_firmware_filter(row, device_type):
+                continue
+
+            entry = _sanitize_standard_firmware_entry(row)
+            entry["version"] = version.strip()
+            bucket = by_model.setdefault(model.strip(), [])
+            if any(existing.get("version") == version for existing in bucket):
+                continue
+            bucket.append(entry)
+
+        if by_model:
+            models[device_type] = by_model
+            resolved_org_id = _resolve_mist_org_id((os.getenv("MIST_TOKEN") or "").strip(), _mist_api_base_url()) or ""
+            sources[device_type] = {
+                "endpoint": f"/orgs/{resolved_org_id}/devices/versions?type={device_type}",
+                "tag_filter": "alpha" if device_type == "ap" else SUGGESTED_FIRMWARE_TAG,
+                "updated_at": _utc_now().isoformat().replace("+00:00", "Z"),
+            }
+            any_changes = True
+
+    if any_changes:
+        _save_firmware_standards_doc(updated, path)
+        new_standard_one = _extract_switch_standard_one_versions(updated)
+        if new_standard_one != previous_standard_one:
+            _sync_switch_auto_upgrade_custom_versions(updated)
+        model_counts = {
+            key: len(value) for key, value in models.items() if isinstance(value, Mapping)
+        }
+        logger.info(
+            "action=firmware_standards_refresh status=updated model_counts=%s",
+            model_counts,
+        )
+        return updated
+    logger.info("action=firmware_standards_refresh status=unchanged reason=no_suggested_versions")
+    return doc
+
+
+def _load_allowed_versions_from_standard_doc(device_type: str) -> Tuple[str, ...]:
+    """Return distinct allowed versions for a device type across all models."""
+
+    by_model = _load_allowed_versions_by_model_from_standard_doc(device_type)
+    versions: List[str] = []
+    seen: Set[str] = set()
+    for allowed_versions in by_model.values():
+        for version in allowed_versions:
+            if version in seen:
+                continue
+            seen.add(version)
+            versions.append(version)
+    return tuple(versions)
+
+
+def _normalize_device_model(model: Any) -> str:
+    if not isinstance(model, str):
+        return ""
+    return model.strip().strip('"').strip("'").upper()
+
+
+def _load_allowed_versions_by_model_from_standard_doc(device_type: str) -> Dict[str, Tuple[str, ...]]:
+    doc = _refresh_firmware_standards_if_needed()
+    models = doc.get("models") if isinstance(doc.get("models"), Mapping) else {}
+    type_blob = models.get(device_type) if isinstance(models, Mapping) else {}
+    if not isinstance(type_blob, Mapping):
+        return {}
+    versions_by_model: Dict[str, Tuple[str, ...]] = {}
+    for model, entries in type_blob.items():
+        model_key = _normalize_device_model(model)
+        if not model_key:
+            continue
+        if not isinstance(entries, list):
+            continue
+        versions: List[str] = []
+        seen: Set[str] = set()
+        for item in entries:
+            if not isinstance(item, Mapping):
+                continue
+            version = item.get("version")
+            if not isinstance(version, str):
+                continue
+            normalized = version.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            versions.append(normalized)
+        versions_by_model[model_key] = tuple(versions)
+    return versions_by_model
 
 
 class RequiredSiteVariablesCheck(ComplianceCheck):
@@ -1758,14 +2304,28 @@ class FirmwareManagementCheck(ComplianceCheck):
         allowed_switch_versions: Optional[Sequence[str]] = None,
         allowed_ap_versions: Optional[Sequence[str]] = None,
     ) -> None:
-        if allowed_switch_versions is None:
-            allowed_switch_versions = _load_version_list_from_env("STD_SW_VER")
-        if allowed_ap_versions is None:
-            allowed_ap_versions = _load_version_list_from_env("STD_AP_VER")
+        self._dynamic_switch_versions = allowed_switch_versions is None
+        self._dynamic_ap_versions = allowed_ap_versions is None
         self.allowed_switch_versions: Tuple[str, ...] = tuple(allowed_switch_versions or ())
         self.allowed_ap_versions: Tuple[str, ...] = tuple(allowed_ap_versions or ())
+        self.allowed_switch_versions_by_model: Dict[str, Tuple[str, ...]] = {}
+        self.allowed_ap_versions_by_model: Dict[str, Tuple[str, ...]] = {}
+        self._allowed_switch_set: Set[str] = set()
+        self._allowed_ap_set: Set[str] = set()
+        self._refresh_allowed_versions()
+
+    def _refresh_allowed_versions(self) -> None:
+        if self._dynamic_switch_versions:
+            self.allowed_switch_versions_by_model = _load_allowed_versions_by_model_from_standard_doc("switch")
+            self.allowed_switch_versions = _load_allowed_versions_from_standard_doc("switch")
+        if self._dynamic_ap_versions:
+            self.allowed_ap_versions_by_model = _load_allowed_versions_by_model_from_standard_doc("ap")
+            self.allowed_ap_versions = _load_allowed_versions_from_standard_doc("ap")
         self._allowed_switch_set = {value for value in self.allowed_switch_versions}
         self._allowed_ap_set = {value for value in self.allowed_ap_versions}
+
+    def prepare_run(self) -> None:
+        self._refresh_allowed_versions()
 
     def run(self, context: SiteContext) -> List[Finding]:
         if not self.allowed_switch_versions and not self.allowed_ap_versions:
@@ -1781,17 +2341,25 @@ class FirmwareManagementCheck(ComplianceCheck):
             device_type: Optional[str] = None
             allowed_versions: Tuple[str, ...]
             allowed_set: Set[str]
+            allowed_by_model: Dict[str, Tuple[str, ...]]
 
             if self.allowed_switch_versions and _is_switch(device_dict):
                 device_type = "Switch"
                 allowed_versions = self.allowed_switch_versions
                 allowed_set = self._allowed_switch_set
+                allowed_by_model = self.allowed_switch_versions_by_model
             elif self.allowed_ap_versions and _is_access_point(device_dict):
                 device_type = "Access point"
                 allowed_versions = self.allowed_ap_versions
                 allowed_set = self._allowed_ap_set
+                allowed_by_model = self.allowed_ap_versions_by_model
             else:
                 continue
+
+            device_model = _normalize_device_model(device_dict.get("model"))
+            if device_model and device_model in allowed_by_model:
+                allowed_versions = allowed_by_model[device_model]
+                allowed_set = set(allowed_versions)
 
             version = _extract_firmware_version(device_dict) or ""
             is_allowed = bool(version) and version in allowed_set

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{DOC_TITLE}}</title>
+  <link rel="icon" type="image/png" href="/static/logo.png" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'media' };</script>
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100 overflow-x-hidden">
+  <nav id="menu" class="fixed inset-y-0 left-0 w-64 bg-white text-slate-900 dark:bg-slate-800 dark:text-slate-100 transform -translate-x-full transition-transform duration-300 z-50 shadow-lg p-4 space-y-2">
+    <p id="user_greeting" class="hidden px-4 py-2 font-semibold"></p>
+    <a href="/hardware" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_HARDWARE}}</a>
+    <a href="/replacements" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_REPLACEMENTS}}</a>
+    <a href="/" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_CONFIG}}</a>
+    <a href="/rules" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_RULES}}</a>
+    <a href="/standards" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_STANDARDS}}</a>
+    <a href="/audit" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">{{NAV_AUDIT}}</a>
+    <a href="{{HELP_URL}}" target="_blank" rel="noopener" class="block px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">Help</a>
+    <button id="logout_btn" class="hidden w-full text-left px-4 py-2 hover:bg-slate-100 dark:hover:bg-slate-700">Log out</button>
+  </nav>
+
+  <div id="main" class="transition-all duration-300">
+    <header class="mb-6 bg-gradient-to-r from-emerald-500 to-sky-500 text-white shadow-lg">
+      <div class="max-w-7xl mx-auto flex items-center gap-4 p-6">
+        <button id="menu_btn" class="p-2 rounded hover:bg-white/30" aria-label="Menu">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" /></svg>
+        </button>
+        <div class="flex items-center gap-4">
+          <img src="/static/logo.png" alt="Logo" class="h-16 w-16" />
+          <div>
+            <h1 class="text-3xl font-bold">{{BANNER_TITLE}}</h1>
+            <p class="text-slate-100 text-sm md:text-base">{{BANNER_TAGLINE}}</p>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="max-w-7xl mx-auto p-6">
+      <section class="bg-white dark:bg-slate-800 dark:border-slate-700 rounded-2xl shadow p-6 space-y-4">
+        <div class="flex flex-col md:flex-row md:items-end gap-3 justify-between">
+          <div>
+            <h2 class="text-lg font-semibold">Firmware Standards Matrix</h2>
+            <p class="text-sm text-slate-600 dark:text-slate-300">Live table of current and historical standards by model. Standard 1 is the ZTP target version for switches.</p>
+          </div>
+          <div class="w-full md:w-96">
+            <label for="standards_filter" class="block text-sm font-medium mb-1">Filter models and standards</label>
+            <input id="standards_filter" type="text" placeholder="Type model, device type, or version" class="w-full border rounded-lg p-3 dark:bg-slate-900 dark:border-slate-700" />
+          </div>
+        </div>
+
+        <p id="standards_meta" class="text-xs text-slate-500 dark:text-slate-400"></p>
+
+        <div class="overflow-x-auto border border-slate-200 dark:border-slate-700 rounded-xl">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-100 dark:bg-slate-900/50">
+              <tr id="standards_header"></tr>
+            </thead>
+            <tbody id="standards_body" class="divide-y divide-slate-200 dark:divide-slate-700"></tbody>
+          </table>
+        </div>
+        <p id="standards_empty" class="hidden text-sm text-slate-500 dark:text-slate-300">No standards match this filter.</p>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const menuBtn = document.getElementById('menu_btn');
+    const menu = document.getElementById('menu');
+    const main = document.getElementById('main');
+    menuBtn.addEventListener('click', () => {
+      menu.classList.toggle('-translate-x-full');
+      main.classList.toggle('ml-64');
+    });
+    document.addEventListener('click', e => {
+      if (!menu.contains(e.target) && !menuBtn.contains(e.target)) {
+        menu.classList.add('-translate-x-full');
+        main.classList.remove('ml-64');
+      }
+    });
+
+    const userGreeting = document.getElementById('user_greeting');
+    const logoutBtn = document.getElementById('logout_btn');
+    fetch('/me').then(res => {
+      if (!res.ok) throw new Error('not authed');
+      return res.json();
+    }).then(data => {
+      userGreeting.textContent = `Hey ${data.user.name}!`;
+      userGreeting.classList.remove('hidden');
+      logoutBtn?.classList.remove('hidden');
+      logoutBtn?.addEventListener('click', (e) => { e.preventDefault(); window.location.href = '/logout'; });
+    }).catch(() => { /* unauthenticated */ });
+
+    const filterInput = document.getElementById('standards_filter');
+    const headerRow = document.getElementById('standards_header');
+    const body = document.getElementById('standards_body');
+    const emptyState = document.getElementById('standards_empty');
+    const meta = document.getElementById('standards_meta');
+    let standardsRows = [];
+    let columns = [];
+
+    function renderTable() {
+      const query = (filterInput.value || '').trim().toLowerCase();
+      const visibleRows = standardsRows.filter((row) => {
+        if (!query) return true;
+        const joined = [row.model, row.device_type, ...(row.standards || [])].join(' ').toLowerCase();
+        return joined.includes(query);
+      });
+
+      body.innerHTML = '';
+      visibleRows.forEach((row) => {
+        const tr = document.createElement('tr');
+        tr.className = 'odd:bg-white even:bg-slate-50 dark:odd:bg-slate-800 dark:even:bg-slate-700';
+        const cells = [row.model, row.device_type, ...(row.standards || [])];
+        cells.forEach((value, idx) => {
+          const td = document.createElement('td');
+          td.className = idx < 2 ? 'p-2 font-medium whitespace-nowrap' : 'p-2 whitespace-nowrap';
+          td.textContent = value || '—';
+          tr.appendChild(td);
+        });
+        body.appendChild(tr);
+      });
+
+      emptyState.classList.toggle('hidden', visibleRows.length > 0);
+    }
+
+    function renderHeaders() {
+      headerRow.innerHTML = '';
+      ['Model', 'Device Type', ...columns].forEach((label) => {
+        const th = document.createElement('th');
+        th.className = 'p-2 text-left font-semibold whitespace-nowrap';
+        th.textContent = label;
+        headerRow.appendChild(th);
+      });
+    }
+
+    async function loadStandards() {
+      const res = await fetch('/api/standards');
+      const data = await res.json();
+      if (!res.ok || !data.ok || !data.table) {
+        throw new Error('Failed to load standards table');
+      }
+
+      columns = Array.isArray(data.table.columns) ? data.table.columns : [];
+      standardsRows = Array.isArray(data.table.rows) ? data.table.rows : [];
+      renderHeaders();
+      renderTable();
+      const generatedAt = data.table.generated_at ? new Date(data.table.generated_at).toLocaleString() : 'not available';
+      meta.textContent = `Models: ${standardsRows.length} • Last refresh: ${generatedAt}`;
+    }
+
+    filterInput.addEventListener('input', renderTable);
+
+    loadStandards().catch((error) => {
+      meta.textContent = error.message;
+      emptyState.classList.remove('hidden');
+    });
+  </script>
+</body>
+</html>

@@ -136,20 +136,92 @@ GreatMigration ships with a responsive FastAPI + HTMX interface backed by a Mist
 
 ## Hamburger menu guide
 
-The hamburger menu (☰) in the top-left opens the main navigation. Each option focuses on one job. Here is the “explain it like I’m 15” version of what each one does and how to use it.
+The hamburger menu (☰) is the primary navigation control across the app. It appears in the top-left of every main page (`/`, `/hardware`, `/replacements`, `/rules`, `/standards`, `/audit`) and opens a slide-out panel with all workflow links plus Help and Log out.
 
-* **Hardware Conversion** – figure out what Juniper gear replaces the Cisco gear you have.
-  * **Use it:** upload a `show tech-support` file or run the SSH collector, then check the suggested replacements and download the report.
-* **Hardware Replacement Rules** – your translation dictionary for “this Cisco model maps to that Juniper model.”
-  * **Use it:** review or edit the replacement list, save it, then re-run hardware conversions to see the updated recommendations.
-* **Config Conversion** – turn Cisco switch configs into Mist-ready JSON payloads.
-  * **Use it:** upload configs (or fetch via SSH), review the converted preview, then stage or push the payloads using Site Deployment Automation.
-* **Port Profile Rules** – auto-tag ports with the right Mist port profile based on how the Cisco port looks.
-  * **Use it:** add rules like “if it’s access VLAN 20 and description matches ‘PRINTER’, use the Printer profile,” then save/export the rules.
-* **Compliance Audit** – check Mist sites for missing variables, naming issues, and template drift; optionally fix with one click.
-  * **Use it:** pick a site, run the audit, drill into the findings, then click fix buttons if you have push rights.
-* **Help** – open your team’s runbook or documentation link.
-  * **Use it:** set `HELP_URL` in `backend/.env` so the Help link opens the right page.
+### How the menu behaves
+
+* **Open/close interaction**
+  * Click the ☰ button to open the left drawer.
+  * Click ☰ again to close it.
+  * Click anywhere outside the drawer to close it.
+* **Layout behavior**
+  * When open, the page content shifts right (`ml-64`) so the drawer does not cover working controls.
+  * The drawer is fixed-position and keeps the same width/site-wide styling across pages.
+* **Cross-page consistency**
+  * The same menu structure is rendered on login + all feature pages, so users can jump directly between workflows without “back” navigation.
+
+### User/session behavior in the menu
+
+* **Greeting + role hint**
+  * After page load, the UI calls `/me` and shows `Hey <username>!` in the menu.
+  * Read-only users are labeled `Hey <username>! (read-only)` on pages that enforce push restrictions.
+* **Log out visibility**
+  * The **Log out** button is hidden until a valid session is detected.
+  * Clicking **Log out** sends the user to `/logout` and clears the session cookie.
+* **Access model reminder**
+  * Menu visibility is broad, but action rights are enforced inside each workflow:
+    * Read-only users can navigate, inspect data, and run non-destructive operations.
+    * Push/fix operations require `can_push` rights (`PUSH_GROUP_DN` or `LOCAL_PUSH_USERS`).
+
+### Menu items and what each one does
+
+1. **Hardware Conversion** (`/hardware`)
+   * Purpose: identify Juniper replacement hardware for existing Cisco inventory.
+   * Typical flow:
+     1. Upload a `show tech-support` file or run SSH hardware collection.
+     2. Review detected chassis/cards/optics and suggested replacements.
+     3. Export results for planning/procurement.
+
+2. **Hardware Replacement Rules** (`/replacements`)
+   * Purpose: maintain the Cisco→Juniper replacement mapping table used by Hardware Conversion.
+   * Typical flow:
+     1. Review existing mappings.
+     2. Add/edit/remove model mappings.
+     3. Save and re-run Hardware Conversion to apply updated rules.
+
+3. **Config Conversion** (`/`)
+   * Purpose: convert Cisco running configs into Mist-ready payloads and run deployment automation.
+   * Typical flow:
+     1. Fetch configs via SSH or upload files.
+     2. Validate parsed output, mappings, and device/site assignments.
+     3. Run stage/test or push workflows depending on permissions.
+
+4. **Port Profile Rules** (`/rules`)
+   * Purpose: define conditional logic that maps Cisco interface traits to Mist port profiles/usages.
+   * Typical flow:
+     1. Create rule conditions (mode, VLANs, regex, etc.).
+     2. Prioritize rules (first match wins).
+     3. Save/export/import `port_rules.json` sets and reuse during conversions.
+
+5. **Standards** (`/standards`)
+   * Purpose: view the firmware standards matrix by model/device type and recent revisions.
+   * Typical flow:
+     1. Open Standards to load the live standards table.
+     2. Filter by model, device type, or version.
+     3. Use this reference while planning conversions and compliance remediation.
+
+6. **Compliance Audit** (`/audit`)
+   * Purpose: run site checks for naming, variable/template drift, and related policy issues.
+   * Typical flow:
+     1. Select target scope/site.
+     2. Run the audit and review findings.
+     3. Export reports and (if authorized) use 1 Click Fix actions.
+
+7. **Help** (`HELP_URL`)
+   * Purpose: open your internal runbook/documentation in a new browser tab.
+   * Setup:
+     * Set `HELP_URL` in `backend/.env`.
+     * If unset, the app falls back to the project README link.
+
+### Recommended operator workflow using the menu
+
+1. Start in **Standards** to confirm target software baselines.
+2. Use **Hardware Replacement Rules** to confirm device mappings.
+3. Run **Hardware Conversion** and **Config Conversion** to stage outputs.
+4. Apply/verify **Port Profile Rules** before final push operations.
+5. Finish with **Compliance Audit** and only then apply fix/push actions.
+
+This sequence keeps the migration path deterministic: standards first, mapping second, conversion third, compliance and enforcement last.
 
 ---
 
@@ -205,6 +277,7 @@ Both scripts read and reuse values in `backend/.env`, so follow-up runs only pro
    * Copy `.env.sample` to `backend/.env` and populate:
      * `MIST_TOKEN`
      * `SESSION_SECRET`
+     * `SESSION_HTTPS_ONLY` (recommended `true`; set to `false` only for local HTTP testing)
      * `AUTH_METHOD` (`local` or `ldap`)
      * For local auth: `LOCAL_USERS` and optional `LOCAL_PUSH_USERS`
      * For LDAP auth: `LDAP_SERVER_URL`, `LDAP_SEARCH_BASE`/`LDAP_SEARCH_BASES`, `LDAP_BIND_TEMPLATE`, `LDAP_SERVICE_DN`, `LDAP_SERVICE_PASSWORD`, plus `PUSH_GROUP_DN` and optional `READONLY_GROUP_DN`
@@ -259,7 +332,8 @@ Think of the backend as a set of small “helpers” that each do one job:
 ## Configuration reference
 
 * **Authentication & authorization**
-  * `AUTH_METHOD=local` uses users listed in `LOCAL_USERS` (`username:password`). Include comma-separated pairs and flag push-enabled accounts in `LOCAL_PUSH_USERS`.
+  * `AUTH_METHOD=local` uses users listed in `LOCAL_USERS` (`username:password`). Use strong, unique passwords and avoid defaults. Include comma-separated pairs and flag push-enabled accounts in `LOCAL_PUSH_USERS`.
+  * `SESSION_HTTPS_ONLY` defaults to `true` and should stay enabled in production so session cookies are not sent over plain HTTP.
   * `AUTH_METHOD=ldap` supports read-only (`READONLY_GROUP_DN`) and push-enabled (`PUSH_GROUP_DN`) directory groups. Multiple values can be separated by semicolons or newlines.
 * **Mist connectivity**
   * `MIST_BASE_URL` defaults to `https://api.ac2.mist.com`. Change it if your org lives in another Mist region.
@@ -268,6 +342,7 @@ Think of the backend as a set of small “helpers” that each do one job:
   * Override naming patterns via `SWITCH_NAME_REGEX_PATTERN` / `AP_NAME_REGEX_PATTERN`.
   * Adjust required site variables with `MIST_SITE_VARIABLES`. Use `key=value` entries (for example, `hubDNSserver1=10.0.0.53`) to supply environment defaults that the 1 Click Fix action can apply automatically when a site is missing values.
   * Enforce device documentation photo counts with `SW_NUM_IMG` and `AP_NUM_IMG`.
+  * Firmware standards for compliance are read from `backend/standard_fw_versions.json`. The app pulls suggested switch/AP versions from Mist on first run (or whenever the file has no stored versions), then refreshes every 90 days when `MIST_TOKEN` and `MIST_ORG_ID` are configured.
 * **1 Click Fix safeguards**
   * AP rename actions derive new names from switch LLDP neighbours. Sites lacking neighbour data will surface actionable warnings but skip changes.
   * Switch DNS cleanup actions verify the applied template (`Prod - Standard Template` for production sites, `Lab` template for lab sites) and the presence of `siteDNSserver`, `hubDNSserver1`, and `hubDNSserver2`. Buttons remain disabled until both checks pass and are annotated with details describing any failures.
