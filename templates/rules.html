@@ -137,6 +137,7 @@
       { value: 'allowed_vlans', help: 'Comma separated VLAN IDs. Example: 10,20,30' }
     ];
     const listFields = new Set(['allowed_vlans']);
+    const booleanFields = new Set(['poe_active', 'has_voice', 'any']);
 
     function createConditionRow(cond){
       const div = document.createElement('div');
@@ -244,6 +245,15 @@
             if(parts.length){
               const nums = parts.map(p=>Number(p)).filter(n=>!Number.isNaN(n));
               when[f] = nums;
+            }
+            return;
+          }
+          if(booleanFields.has(f)){
+            const boolVal = raw.toLowerCase();
+            if(boolVal === 'true' || boolVal === 'false'){
+              when[f] = boolVal === 'true';
+            } else {
+              when[f] = raw;
             }
             return;
           }
