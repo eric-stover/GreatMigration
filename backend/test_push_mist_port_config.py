@@ -38,6 +38,27 @@ def test_validate_rules_doc_accepts_allowed_vlans_condition():
     validate_rules_doc(doc)
 
 
+def test_validate_rules_doc_accepts_poe_active_condition():
+    doc = {
+        "rules": [
+            {
+                "name": "ap-trunk-poe",
+                "when": {"mode": "trunk", "poe_active": True},
+                "set": {"usage": "ap"},
+            }
+        ]
+    }
+
+    validate_rules_doc(doc)
+
+
+def test_evaluate_rule_matches_poe_active_from_power_draw():
+    intf = {"mode": "trunk", "power_draw": 6.5}
+
+    assert evaluate_rule({"mode": "trunk", "poe_active": True}, intf) is True
+    assert evaluate_rule({"mode": "trunk", "poe_active": False}, intf) is False
+
+
 def test_evaluate_rule_treats_access_without_data_vlan_as_vlan_1():
     intf = {
         "mode": "access",
@@ -55,6 +76,21 @@ def test_validate_rules_doc_rejects_invalid_allowed_vlans(value):
             {
                 "name": "bad",
                 "when": {"allowed_vlans": value},
+                "set": {"usage": "ap"},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError):
+        validate_rules_doc(doc)
+
+
+def test_validate_rules_doc_rejects_invalid_poe_active_type():
+    doc = {
+        "rules": [
+            {
+                "name": "bad-poe",
+                "when": {"poe_active": "yes"},
                 "set": {"usage": "ap"},
             }
         ]

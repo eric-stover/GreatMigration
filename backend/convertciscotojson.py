@@ -100,6 +100,37 @@ def to_int(x) -> Optional[int]:
     except Exception:
         return None
 
+
+def _normalize_cisco_ifname(name: str) -> str:
+    short = re.sub(r"\s+", "", (name or "")).lower()
+    short = re.sub(r"^gigabitethernet", "gi", short)
+    short = re.sub(r"^tengigabitethernet", "te", short)
+    short = re.sub(r"^ten", "te", short)
+    return short
+
+
+def parse_show_power_inline(raw_text: str) -> Dict[str, float]:
+    """Return Cisco interface -> power draw watts parsed from 'show power inline' output."""
+    results: Dict[str, float] = {}
+    if not raw_text:
+        return results
+
+    line_re = re.compile(
+        r"^(?P<intf>(?:Gi|GigabitEthernet|Te|TenGigabitEthernet|Ten)\S+)\s+\S+\s+\S+\s+(?P<watts>[0-9]+(?:\.[0-9]+)?)\b",
+        flags=re.IGNORECASE,
+    )
+    for line in raw_text.splitlines():
+        match = line_re.match(line.strip())
+        if not match:
+            continue
+        try:
+            watts = float(match.group("watts"))
+        except ValueError:
+            continue
+        results[_normalize_cisco_ifname(match.group("intf"))] = watts
+
+    return results
+
 # ----------------------------
 # Model layout helpers
 # ----------------------------
@@ -238,8 +269,11 @@ def convert_one_file(
     base_name = os.path.splitext(os.path.basename(str(input_path)))[0]
     output_file = out_dir / f"{base_name}_converted.json"
 
+    raw_text = input_path.read_text(encoding="utf-8", errors="ignore")
+
     # Parse config
     conf = CiscoConfParse(str(input_path), factory=True)
+    poe_watts_map = parse_show_power_inline(raw_text)
 
     # Infer VC size from source (max member number) and per-member models
     member_numbers = []
@@ -351,6 +385,12 @@ def convert_one_file(
             "src_port": src_port,
             "children": children,
         }
+
+        watts = poe_watts_map.get(_normalize_cisco_ifname(ifname))
+        if watts is not None:
+            iface["poe_watts"] = watts
+            iface["poe_active"] = watts > 0.0
+
         if mapping_overflow:
             iface["mapping_overflow"] = True
         interfaces.append(iface)

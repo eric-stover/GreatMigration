@@ -345,7 +345,7 @@ def test_remove_temp_config_returns_preview_when_dry_run(monkeypatch, app_module
 
     monkeypatch.setattr(
         app_module,
-        "_derive_port_config_from_config_cmd",
+        "_derive_port_config_from_port_profiles",
         lambda *args, **kwargs: {"ge-0/0/1": {"usage": "derived_user"}},
     )
 
@@ -401,6 +401,11 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
 
     monkeypatch.setattr(app_module.requests, "put", fake_put)
     monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(
+        app_module,
+        "_derive_port_config_from_port_profiles",
+        lambda *args, **kwargs: {"ge-0/0/5": {"usage": "access"}},
+    )
 
     final_payload = {"port_config": {"ge-0/0/5": {"usage": "access"}}}
     row = {
@@ -420,17 +425,16 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
     assert result["ok"] is True
     assert result["successes"] == 1
     assert result["failures"] == []
-    assert len(calls) == 4
-    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/devices/device-1/config_cmd"
+    assert len(calls) == 3
+    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/setting"
     assert calls[1]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["json"] == {
+    assert calls[1]["json"] == {
         "networks": {},
         "port_usages": {},
         "port_config": {},
         "port_overrides": [],
     }
-    assert calls[3]["json"] == final_payload
+    assert calls[2]["json"] == final_payload
 
 
 def test_remove_temp_config_preserves_legacy_vlan(monkeypatch, app_module):
@@ -529,6 +533,33 @@ def test_cleanup_payload_preserves_legacy_usage_name(app_module):
 
     assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
     assert cleanup["port_config"] == {"ge-0/0/20": {"usage": "legacy_AUTO_ACCESS_V10_POE_EDGE"}}
+
+
+def test_cleanup_payload_does_not_preserve_network_only_trunk_port_config(app_module):
+    settings = {
+        "networks": {
+            "legacy_net": {"vlan_id": 10, "note": "keep"},
+            "temp_net": {"vlan_id": 200, "note": "drop"},
+        },
+        "switch": {
+            "port_config": {
+                "ge-0/0/10": {
+                    "mode": "trunk",
+                    "native_network": "legacy_net",
+                    "networks": ["legacy_net"],
+                }
+            }
+        },
+    }
+
+    cleanup = app_module._build_site_cleanup_payload_for_setting(
+        settings,
+        preserve_legacy_vlans=True,
+        legacy_vlan_ids={10},
+    )
+
+    assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
+    assert cleanup["port_config"] == {}
 
 
 def test_cleanup_payload_preserves_all_networks_trunk(app_module):

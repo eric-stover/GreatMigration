@@ -11,6 +11,17 @@
       }
     },
     {
+      "name": "AP trunk example (PoE)",
+      "when": {
+        "mode": "trunk",
+        "native_vlan": 4,
+        "poe_active": true
+      },
+      "set": {
+        "usage": "ap"
+      }
+    },
+    {
       "name": "Trunk uplink example",
       "when": {
         "mode": "trunk",
