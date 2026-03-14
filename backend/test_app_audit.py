@@ -621,6 +621,51 @@ def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     assert derived["ge-0/0/20"]["usage"] == "legacy_AUTO_ACCESS_V10_POE_EDGE"
     assert derived["ge-0/0/21"]["usage"] == "end_user"
 
+
+
+def test_derive_port_config_returns_decisions_when_requested(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "ge-0/0/1": {"usage": "legacy_keep"},
+            "ge-0/0/2": {"usage": "AUTO_ACCESS"},
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"name": "default-user", "when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        preserve_usage_names={"legacy_keep"},
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["ge-0/0/1"]["usage"] == "legacy_keep"
+    assert derived["port_config"]["ge-0/0/2"]["usage"] == "end_user"
+    decisions = derived.get("decisions")
+    assert isinstance(decisions, list)
+    assert len(decisions) == 2
+    assert any(d.get("preserved") is True and d.get("port_id") == "ge-0/0/1" for d in decisions)
+    assert any(d.get("matched_rule") == "default-user" and d.get("port_id") == "ge-0/0/2" for d in decisions)
+
 def test_load_site_history_parses_breakdown(tmp_path):
     from audit_history import load_site_history
 

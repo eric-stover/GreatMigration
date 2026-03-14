@@ -4206,6 +4206,7 @@ def _derive_port_config_from_port_profiles(
     site_id: str,
     device_id: str,
     preserve_usage_names: Optional[Set[str]] = None,
+    include_decisions: bool = False,
 ) -> Dict[str, Any]:
     headers = _mist_headers(token)
     preserve_usage_names = set(preserve_usage_names or set())
@@ -4281,6 +4282,7 @@ def _derive_port_config_from_port_profiles(
     rules = pm.RULES_DOC.get("rules", []) if isinstance(pm.RULES_DOC, Mapping) else []
 
     derived_config: Dict[str, Dict[str, Any]] = {}
+    decisions: List[Dict[str, Any]] = []
     for port_id, entry in port_config.items():
         if not isinstance(port_id, str) or not port_id.strip():
             continue
@@ -4288,7 +4290,18 @@ def _derive_port_config_from_port_profiles(
             continue
         usage_name = str(entry.get("usage") or "").strip()
         if usage_name and usage_name in preserve_usage_names:
-            derived_config[port_id] = _compact_dict(dict(entry))
+            preserved_entry = _compact_dict(dict(entry))
+            derived_config[port_id] = preserved_entry
+            if include_decisions:
+                decisions.append(
+                    {
+                        "port_id": port_id,
+                        "source_usage": usage_name,
+                        "result_usage": str(preserved_entry.get("usage") or usage_name or ""),
+                        "preserved": True,
+                        "reason": "usage name is in preserve_usage_names",
+                    }
+                )
             continue
         usage_config = port_usages.get(usage_name) if usage_name else None
         if not isinstance(usage_config, Mapping):
@@ -4315,22 +4328,53 @@ def _derive_port_config_from_port_profiles(
         }
 
         chosen_usage: Optional[str] = None
-        for rule in rules:
+        matched_rule_name: Optional[str] = None
+        evaluated_rules: List[Dict[str, Any]] = []
+        for idx, rule in enumerate(rules, 1):
             if not isinstance(rule, Mapping):
                 continue
             when = rule.get("when", {}) or {}
             if not isinstance(when, Mapping):
                 continue
-            if pm.evaluate_rule(when, intf):
+            matched = pm.evaluate_rule(when, intf)
+            if include_decisions:
+                evaluated_rules.append(
+                    {
+                        "index": idx,
+                        "name": str(rule.get("name") or f"rule-{idx}"),
+                        "matched": bool(matched),
+                        "when": dict(when),
+                    }
+                )
+            if matched:
                 set_cfg = rule.get("set", {}) or {}
                 if isinstance(set_cfg, Mapping):
                     chosen_usage = set_cfg.get("usage") or chosen_usage
+                matched_rule_name = str(rule.get("name") or f"rule-{idx}")
                 break
 
+        result_usage = str(chosen_usage or "blackhole")
         derived_config[port_id] = {
-            "usage": chosen_usage or "blackhole",
+            "usage": result_usage,
         }
+        if include_decisions:
+            decisions.append(
+                {
+                    "port_id": port_id,
+                    "source_usage": usage_name,
+                    "result_usage": result_usage,
+                    "preserved": False,
+                    "matched_rule": matched_rule_name,
+                    "interface": _compact_dict(dict(intf)),
+                    "evaluated_rules": evaluated_rules,
+                }
+            )
 
+    if include_decisions:
+        return {
+            "port_config": derived_config,
+            "decisions": decisions,
+        }
     return derived_config
 
 
@@ -4721,6 +4765,7 @@ def _remove_temporary_config_for_rows(
     preserve_legacy_vlans = bool(preserve_legacy_vlans and effective_legacy_vlan_ids)
 
     derived_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    derivation_decisions: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     derivation_warnings: Dict[Tuple[str, str], str] = {}
 
     def _collect_site_cleanup_targets(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -4814,13 +4859,35 @@ def _remove_temporary_config_for_rows(
             continue
         preserve_usages = preserved_usage_names_by_site.get(site_id, set())
         try:
-            port_config = _derive_port_config_from_port_profiles(
+            derived_result = _derive_port_config_from_port_profiles(
                 base_url,
                 token,
                 site_id,
                 device_id,
                 preserve_usage_names=preserve_usages,
+                include_decisions=True,
             )
+            port_config: Dict[str, Any] = {}
+            decisions: List[Dict[str, Any]] = []
+            if isinstance(derived_result, Mapping) and "port_config" in derived_result:
+                raw_pc = derived_result.get("port_config")
+                if isinstance(raw_pc, Mapping):
+                    port_config = dict(raw_pc)
+                raw_decisions = derived_result.get("decisions")
+                if isinstance(raw_decisions, list):
+                    decisions = [d for d in raw_decisions if isinstance(d, Mapping)]
+            elif isinstance(derived_result, Mapping):
+                port_config = dict(derived_result)
+
+            if decisions:
+                derivation_decisions[key] = decisions
+                action_logger.info(
+                    "lcm_step3_port_profile_decisions site=%s device=%s decisions=%s",
+                    site_id,
+                    device_id,
+                    json.dumps(decisions, separators=(",", ":"), default=str),
+                )
+
             if port_config:
                 derived_payloads[key] = {"port_config": port_config}
             else:
@@ -4841,6 +4908,9 @@ def _remove_temporary_config_for_rows(
                 "cleanup_request": copy.deepcopy(cleanup_payload),
                 "push_request": copy.deepcopy(final_payload) if isinstance(final_payload, Mapping) else {},
             }
+            decisions = derivation_decisions.get(key)
+            if decisions:
+                preview_payload["port_profile_decisions"] = decisions
             warn_text = derivation_warnings.get(key)
             if warn_text:
                 preview_payload["derivation_warning"] = warn_text
@@ -4851,6 +4921,7 @@ def _remove_temporary_config_for_rows(
                     "payload": {
                         "cleanup_request": cleanup_payload,
                         "push_request": final_payload,
+                        "port_profile_decisions": derivation_decisions.get(key, []),
                     },
                 }
             )
