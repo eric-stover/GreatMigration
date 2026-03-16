@@ -414,6 +414,14 @@
         return result;
       }
 
+      function formatDeviceLabel(deviceId, deviceName) {
+        const id = typeof deviceId === 'string' ? deviceId.trim() : String(deviceId || '').trim();
+        const name = typeof deviceName === 'string' ? deviceName.trim() : '';
+        if (!name) return id;
+        if (!id) return name;
+        return `${name} (${id.slice(-6)})`;
+      }
+
       function chooseSpareSwitchOption(action) {
         if (!action || typeof action !== 'object') return Promise.resolve(null);
         const metadata = action.metadata && typeof action.metadata === 'object' ? action.metadata : {};
@@ -445,7 +453,7 @@
           options.forEach(item => {
             const option = document.createElement('option');
             option.value = String(item.device_id);
-            option.textContent = item.device_name || item.device_id;
+            option.textContent = formatDeviceLabel(item.device_id, item.device_name);
             select.appendChild(option);
           });
 
@@ -475,7 +483,7 @@
               return;
             }
             const selected = options.find(item => String(item.device_id) === selectedSwitchId);
-            close({ selectedSwitchId, selectedSwitchName: (selected && selected.device_name) || selectedSwitchId });
+            close({ selectedSwitchId, selectedSwitchName: formatDeviceLabel(selectedSwitchId, selected?.device_name) || selectedSwitchId });
           });
 
           overlay.addEventListener('click', event => {
