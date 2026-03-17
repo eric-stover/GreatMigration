@@ -3837,6 +3837,8 @@ def _build_site_cleanup_payload_for_setting(
                 keep = True
             if not keep and _usage_name_targets_legacy(usage_value, legacy_vlan_ids):
                 keep = True
+            if not keep and _port_usage_references_networks(cfg, preserved_network_names):
+                keep = True
             if keep:
                 preserved_port_config[port_key] = _compact_dict(dict(cfg))
 
