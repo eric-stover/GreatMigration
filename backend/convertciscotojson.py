@@ -237,7 +237,10 @@ def infer_member_models(conf: CiscoConfParse, uplink_module: int) -> Dict[int, s
 
     member_models: Dict[int, str] = {}
     for member, max_port in per_member_max.items():
-        member_models[member] = "ex4100-24mp" if max_port <= 24 else "ex4100-48mp"
+        # Catalyst 24-port models often present ports 25-28 as SFP uplinks on
+        # Gi<member>/0/<port>. Treat <=28 as a 24MP footprint to avoid
+        # misclassifying as 48MP and generating wrong ge/mge prefixes.
+        member_models[member] = "ex4100-24mp" if max_port <= 28 else "ex4100-48mp"
 
     # If a member had no access ports (only uplinks), assume 48MP for safety.
     # This keeps mapping valid even for uplink-only configs.
