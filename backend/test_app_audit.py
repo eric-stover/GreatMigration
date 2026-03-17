@@ -681,14 +681,14 @@ def test_cleanup_payload_preserves_all_networks_trunk(app_module):
 
 
 
-def test_normalize_access_port_name_for_model_ex4100_24mp(app_module):
-    assert app_module._normalize_access_port_name_for_model("mge-0/0/9", "EX4100-24MP") == "ge-0/0/9"
-    assert app_module._normalize_access_port_name_for_model("mge-0/0/7", "EX4100-24MP") == "mge-0/0/7"
-    assert app_module._normalize_access_port_name_for_model("ge-0/0/2", "EX4100-24MP") == "mge-0/0/2"
-    assert app_module._normalize_access_port_name_for_model("xe-0/2/1", "EX4100-24MP") == "xe-0/2/1"
+def test_resolve_interface_name_from_available_ports_supports_ge_mge(app_module):
+    available = {"ge-0/0/9", "mge-0/0/7"}
+    assert app_module._resolve_interface_name_from_available_ports("mge-0/0/9", available) == "ge-0/0/9"
+    assert app_module._resolve_interface_name_from_available_ports("ge-0/0/7", available) == "mge-0/0/7"
+    assert app_module._resolve_interface_name_from_available_ports("xe-0/2/1", available) is None
 
 
-def test_derive_port_config_normalizes_access_prefixes_by_model(monkeypatch, app_module):
+def test_derive_port_config_keeps_port_ids_without_model_normalization(monkeypatch, app_module):
     device_info = {
         "model": "EX4100-24MP",
         "port_config": {
@@ -724,10 +724,8 @@ def test_derive_port_config_normalizes_access_prefixes_by_model(monkeypatch, app
         "device-1",
     )
 
-    assert "mge-0/0/9" not in derived
-    assert "mge-0/0/23" not in derived
-    assert derived["ge-0/0/9"]["usage"] == "end_user"
-    assert derived["ge-0/0/23"]["usage"] == "end_user"
+    assert derived["mge-0/0/9"]["usage"] == "end_user"
+    assert derived["mge-0/0/23"]["usage"] == "end_user"
     assert derived["xe-0/2/1"]["usage"] == "end_user"
 
 
@@ -765,8 +763,27 @@ def test_derive_port_config_uses_model_hint_when_device_model_unknown(monkeypatc
         model_hint="EX4100-24MP",
     )
 
-    assert "mge-0/0/9" not in derived
-    assert derived["ge-0/0/9"]["usage"] == "end_user"
+    assert derived["mge-0/0/9"]["usage"] == "end_user"
+
+
+def test_extract_physical_port_ids_from_devicetype_yaml(app_module):
+    yaml_text = """
+manufacturer: Juniper
+model: EX4100-48MP
+interfaces:
+  - name: ge-0/0/0
+    type: 1000base-t
+  - name: ge-0/0/1
+    type: 1000base-t
+  - name: xe-0/2/0
+    type: 10gbase-x-sfpp
+console-ports:
+  - name: con0
+"""
+
+    ports = app_module._extract_physical_port_ids_from_devicetype_yaml(yaml_text)
+
+    assert ports == {"ge-0/0/0", "ge-0/0/1", "xe-0/2/0"}
 
 
 def test_extract_physical_port_ids_from_if_stat_filters_non_physical(app_module):
@@ -788,18 +805,11 @@ def test_build_payload_for_row_filters_ports_not_present_in_if_stat(monkeypatch,
     monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100-24MP")
     monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
 
-    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
-        if path.endswith("/stats/devices/device-1?type=switch"):
-            return {
-                "if_stat": {
-                    "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True},
-                    "ge-0/0/1.0": {"port_id": "ge-0/0/1", "up": True},
-                    "lo0.0": {"port_id": "lo0", "up": True},
-                }
-            }
-        return None
-
-    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model",
+        lambda model: {"ge-0/0/0", "ge-0/0/1"},
+    )
 
     result = app_module._build_payload_for_row(
         base_url="https://example.com/api/v1",
@@ -834,17 +844,11 @@ def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatc
     monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
     monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
 
-    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
-        if path.endswith("/stats/devices/device-1?type=switch"):
-            return {
-                "if_stat": {
-                    "ge-0/0/8.0": {"port_id": "ge-0/0/8", "up": True},
-                    "ge-0/0/9.0": {"port_id": "ge-0/0/9", "up": True},
-                }
-            }
-        return None
-
-    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model",
+        lambda model: {"ge-0/0/8", "ge-0/0/9"},
+    )
 
     result = app_module._build_payload_for_row(
         base_url="https://example.com/api/v1",
@@ -878,17 +882,11 @@ def test_build_payload_for_row_uses_source_interface_numbering_for_dynamic_mappi
     monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
     monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
 
-    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
-        if path.endswith("/stats/devices/device-1?type=switch"):
-            return {
-                "if_stat": {
-                    "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True},
-                    "ge-0/0/23.0": {"port_id": "ge-0/0/23", "up": True},
-                }
-            }
-        return None
-
-    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model",
+        lambda model: {"ge-0/0/0", "ge-0/0/23"},
+    )
 
     result = app_module._build_payload_for_row(
         base_url="https://example.com/api/v1",
@@ -1129,3 +1127,46 @@ def test_load_site_history_parses_breakdown(tmp_path):
     assert west_dict["runs"][0]["devices"] == 30
     assert history["Wahpeton"].issues_total == 1
     assert history["Unknown"].run_count == 0
+
+
+def test_get_switch_physical_ports_for_model_uses_netbox_library(monkeypatch, app_module):
+    app_module._NETBOX_DEVICE_TYPE_URL_CACHE.clear()
+    app_module._NETBOX_MODEL_PORT_CACHE.clear()
+
+    class _Resp:
+        def __init__(self, status_code: int, payload=None, text: str = ""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url: str, timeout: int = 60):
+        if url == app_module.NETBOX_JUNIPER_DEVICETYPE_INDEX_URL:
+            return _Resp(
+                200,
+                payload=[
+                    {
+                        "name": "EX4100-48MP.yaml",
+                        "download_url": "https://example.test/EX4100-48MP.yaml",
+                    }
+                ],
+            )
+        if url == "https://example.test/EX4100-48MP.yaml":
+            return _Resp(
+                200,
+                text="""interfaces:
+  - name: ge-0/0/0
+  - name: ge-0/0/1
+console-ports:
+  - name: con0
+""",
+            )
+        return _Resp(404, payload={})
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+
+    ports = app_module._get_switch_physical_ports_for_model("EX4100-48MP")
+
+    assert ports == {"ge-0/0/0", "ge-0/0/1"}

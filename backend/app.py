@@ -128,6 +128,12 @@ RESERVED_VLAN_IDS: Set[int] = set(RESERVED_VLAN_NAME_MAP.keys())
 LEGACY_VLAN_LABEL = _format_vlan_id_set(LEGACY_VLAN_IDS) or _format_vlan_id_set(DEFAULT_LEGACY_VLAN_IDS)
 LEGACY_PREFIX = "legacy_"
 
+NETBOX_JUNIPER_DEVICETYPE_INDEX_URL = (
+    "https://api.github.com/repos/netbox-community/devicetype-library/contents/device-types/Juniper"
+)
+_NETBOX_DEVICE_TYPE_URL_CACHE: Dict[str, Optional[str]] = {}
+_NETBOX_MODEL_PORT_CACHE: Dict[str, Set[str]] = {}
+
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 PAGE_COPY: dict[str, dict[str, str]] = {
@@ -2163,7 +2169,7 @@ def _build_payload_for_row(
         "Accept": "application/json",
     }
     try:
-        available_physical_ports = _get_switch_physical_ports(base_url, headers, site_id, device_id)
+        available_physical_ports = _get_switch_physical_ports_for_model(model)
     except Exception:
         available_physical_ports = None
 
@@ -4183,31 +4189,93 @@ def _parse_config_cmd_interfaces(cli_lines: Sequence[str]) -> List[Dict[str, Any
 
 
 
-def _normalize_access_port_name_for_model(ifname: str, model: Optional[str]) -> str:
-    """Normalize ge/mge prefix on PIC 0 based on known model cutoffs."""
-    m = pm.MIST_IF_RE.match(str(ifname or "").strip())
-    if not m:
-        return ifname
+def _normalize_device_model_key(model: Optional[str]) -> str:
+    text = str(model or "").strip().upper()
+    text = re.sub(r"[^A-Z0-9-]", "", text)
+    return text
 
-    itype = m.group("type")
-    pic = int(m.group("pic"))
-    port = int(m.group("port"))
-    member = int(m.group("member"))
-    if pic != 0 or itype not in {"ge", "mge"}:
-        return ifname
 
-    mk = pm._model_key(model)
-    if mk in {"EX4100-24", "EX4100-24MP"}:
-        cutoff = 8
-    elif mk in {"EX4100-48", "EX4100-48MP"}:
-        cutoff = 16
-    else:
-        return ifname
+def _load_netbox_juniper_model_download_urls() -> Dict[str, str]:
+    resp = requests.get(NETBOX_JUNIPER_DEVICETYPE_INDEX_URL, timeout=60)
+    if not (200 <= resp.status_code < 300):
+        raise RuntimeError(f"Failed to load Juniper device type index (HTTP {resp.status_code})")
+    payload = resp.json()
+    if not isinstance(payload, list):
+        return {}
 
-    expected_type = "mge" if port < cutoff else "ge"
-    if expected_type == itype:
-        return ifname
-    return f"{expected_type}-{member}/{pic}/{port}"
+    mapping: Dict[str, str] = {}
+    for item in payload:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        download_url = str(item.get("download_url") or "").strip()
+        if not name.lower().endswith(".yaml") or not download_url:
+            continue
+        model_name = name.rsplit(".", 1)[0]
+        key = _normalize_device_model_key(model_name)
+        if key:
+            mapping[key] = download_url
+    return mapping
+
+
+def _extract_physical_port_ids_from_devicetype_yaml(yaml_text: str) -> Set[str]:
+    ports: Set[str] = set()
+    in_interfaces = False
+    for raw_line in str(yaml_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        if not in_interfaces:
+            if stripped == "interfaces:":
+                in_interfaces = True
+            continue
+
+        # stop when next top-level section begins
+        if not raw_line.startswith(" ") and stripped.endswith(":"):
+            break
+
+        name_match = re.search(r"(?:^-\s*)?name:\s*['\"]?([^'\"#]+)", stripped)
+        if not name_match:
+            continue
+        ifname = name_match.group(1).strip()
+        if pm.MIST_IF_RE.match(ifname):
+            ports.add(ifname)
+
+    return ports
+
+
+
+def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[str]]:
+    model_key = _normalize_device_model_key(model)
+    if not model_key:
+        return None
+    if model_key in _NETBOX_MODEL_PORT_CACHE:
+        return set(_NETBOX_MODEL_PORT_CACHE[model_key])
+
+    download_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
+    if model_key not in _NETBOX_DEVICE_TYPE_URL_CACHE:
+        index_map = _load_netbox_juniper_model_download_urls()
+        _NETBOX_DEVICE_TYPE_URL_CACHE.update({k: v for k, v in index_map.items() if k not in _NETBOX_DEVICE_TYPE_URL_CACHE})
+        download_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
+        if download_url is None:
+            # fallback: try direct predictable path
+            guessed = f"https://raw.githubusercontent.com/netbox-community/devicetype-library/master/device-types/Juniper/{model_key}.yaml"
+            _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = guessed
+            download_url = guessed
+
+    if not download_url:
+        return None
+
+    resp = requests.get(download_url, timeout=60)
+    if not (200 <= resp.status_code < 300):
+        return None
+
+    ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
+    if not ports:
+        return None
+    _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
+    return set(ports)
 
 
 def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
@@ -4260,25 +4328,6 @@ def _resolve_interface_name_from_available_ports(
 
     return None
 
-
-def _get_switch_physical_ports(
-    base_url: str,
-    headers: Mapping[str, str],
-    site_id: str,
-    device_id: str,
-) -> Optional[Set[str]]:
-    stats = _mist_get_json(
-        base_url,
-        headers,
-        f"/sites/{site_id}/stats/devices/{device_id}?type=switch",
-        optional=True,
-    )
-    if not isinstance(stats, Mapping):
-        return None
-
-    if_stat = stats.get("if_stat")
-    ports = _extract_physical_port_ids_from_if_stat(if_stat)
-    return ports if ports else None
 
 def _build_dynamic_destination_port_map(
     temp_interfaces: Sequence[Any],
@@ -4408,7 +4457,7 @@ def _derive_port_config_from_config_cmd(
 
     physical_ports: Optional[Set[str]] = None
     try:
-        physical_ports = _get_switch_physical_ports(base_url, headers, site_id, device_id)
+        physical_ports = _get_switch_physical_ports_for_model(device_model)
     except Exception:
         physical_ports = None
 
@@ -4569,7 +4618,7 @@ def _derive_port_config_from_port_profiles(
                 hinted_model_key = pm._model_key(model_hint)
                 if hinted_model_key in pm.MODEL_CAPS and selected_model_key not in pm.MODEL_CAPS:
                     model_for_port = model_hint
-            normalized_port_id = _normalize_access_port_name_for_model(port_id, model_for_port)
+            normalized_port_id = port_id
 
         usage_name = str(entry.get("usage") or "").strip()
         usage_config = port_usages.get(usage_name) if usage_name else None
