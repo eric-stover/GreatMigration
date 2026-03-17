@@ -4360,7 +4360,12 @@ def _derive_port_config_from_port_profiles(
             normalized_port_id = _normalize_access_port_name_for_model(port_id, model_for_port)
 
         usage_name = str(entry.get("usage") or "").strip()
-        if usage_name and usage_name in preserve_usage_names:
+        usage_config = port_usages.get(usage_name) if usage_name else None
+        if not isinstance(usage_config, Mapping):
+            usage_config = {}
+
+        preserve_usage = usage_name and usage_name in preserve_usage_names
+        if preserve_usage and str(usage_config.get("mode") or "").strip().lower() != "trunk":
             preserved_entry = _compact_dict(dict(entry))
             derived_config[normalized_port_id] = preserved_entry
             if include_decisions:
@@ -4374,9 +4379,6 @@ def _derive_port_config_from_port_profiles(
                     }
                 )
             continue
-        usage_config = port_usages.get(usage_name) if usage_name else None
-        if not isinstance(usage_config, Mapping):
-            usage_config = {}
 
         port_network = usage_config.get("port_network")
         voip_network = usage_config.get("voip_network")

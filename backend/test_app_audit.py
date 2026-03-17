@@ -805,6 +805,51 @@ def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
 
 
 
+
+
+def test_derive_port_config_does_not_preserve_trunk_usage_names(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "ge-0/0/20": {"usage": "legacy_AUTO_TRUNK_N4_POE"},
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "legacy_AUTO_TRUNK_N4_POE": {
+                "mode": "trunk",
+                "native_network": "corp",
+                "networks": ["corp"],
+            },
+        },
+        "networks": {"corp": {"vlan_id": 4}},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"name": "to-ap", "when": {"mode": "trunk"}, "set": {"usage": "ap"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        preserve_usage_names={"legacy_AUTO_TRUNK_N4_POE"},
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["ge-0/0/20"]["usage"] == "ap"
+    decision = derived["decisions"][0]
+    assert decision["preserved"] is False
+    assert decision["matched_rule"] == "to-ap"
+
 def test_derive_port_config_returns_decisions_when_requested(monkeypatch, app_module):
     device_info = {
         "port_config": {
