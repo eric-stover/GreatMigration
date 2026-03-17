@@ -2170,14 +2170,10 @@ def _build_payload_for_row(
     if available_physical_ports is not None:
         filtered_port_config: Dict[str, Dict[str, Any]] = {}
         for ifname, cfg in port_config.items():
-            if not pm.MIST_IF_RE.match(ifname):
-                filtered_port_config[ifname] = cfg
-                continue
-            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports, model)
-            if not resolved_ifname:
+            if pm.MIST_IF_RE.match(ifname) and ifname not in available_physical_ports:
                 unavailable_ports.append(ifname)
                 continue
-            filtered_port_config[resolved_ifname] = cfg
+            filtered_port_config[ifname] = cfg
         port_config = filtered_port_config
 
         if isinstance(temp_source, dict) and isinstance(temp_source.get("interfaces"), list):
@@ -2186,15 +2182,9 @@ def _build_payload_for_row(
                 if not isinstance(intf, Mapping):
                     continue
                 ifname = str(intf.get("juniper_if") or "").strip()
-                if not pm.MIST_IF_RE.match(ifname):
-                    filtered_interfaces.append(intf)
+                if pm.MIST_IF_RE.match(ifname) and ifname not in available_physical_ports:
                     continue
-                resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports, model)
-                if not resolved_ifname:
-                    continue
-                updated = dict(intf)
-                updated["juniper_if"] = resolved_ifname
-                filtered_interfaces.append(updated)
+                filtered_interfaces.append(intf)
             temp_source["interfaces"] = filtered_interfaces
 
     # Capacity validation (block live push; warn on dry-run)
@@ -4219,40 +4209,6 @@ def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
     return physical_ports
 
 
-
-def _resolve_interface_name_from_available_ports(
-    ifname: str,
-    available_physical_ports: Set[str],
-    model: Optional[str] = None,
-) -> Optional[str]:
-    """Resolve an interface name to an available physical port ID.
-
-    Supports ge/mge prefix correction on PIC0 so callers can keep mappings even
-    when inferred model prefix differs from the claimed switch if_stat prefix.
-    """
-    candidate = str(ifname or "").strip()
-    if not candidate:
-        return None
-    if candidate in available_physical_ports:
-        return candidate
-
-    m = pm.MIST_IF_RE.match(candidate)
-    if not m:
-        return None
-
-    normalized = _normalize_access_port_name_for_model(candidate, model)
-    if normalized in available_physical_ports:
-        return normalized
-
-    itype = m.group("type")
-    pic = int(m.group("pic"))
-    if pic == 0 and itype in {"ge", "mge"}:
-        alt_type = "ge" if itype == "mge" else "mge"
-        alt = f"{alt_type}-{m.group('member')}/{m.group('pic')}/{m.group('port')}"
-        if alt in available_physical_ports:
-            return alt
-
-    return None
 def _get_switch_physical_ports(
     base_url: str,
     headers: Mapping[str, str],
@@ -4364,23 +4320,14 @@ def _derive_port_config_from_config_cmd(
         if pic == 2 and port >= caps.get("uplink_pic2", 0):
             continue
         normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
-        if physical_ports is not None:
-            resolved_ifname = _resolve_interface_name_from_available_ports(
-                normalized_ifname,
-                physical_ports,
-                model,
-            )
-            if not resolved_ifname:
-                continue
-            filtered[resolved_ifname] = cfg
+        if physical_ports is not None and normalized_ifname not in physical_ports:
             continue
         filtered[normalized_ifname] = cfg
 
     if not filtered and physical_ports is not None:
         for ifname, cfg in port_config.items():
-            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, physical_ports, device_model)
-            if resolved_ifname:
-                filtered[resolved_ifname] = cfg
+            if ifname in physical_ports:
+                filtered[ifname] = cfg
     return filtered
 
 
