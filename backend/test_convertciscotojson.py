@@ -63,3 +63,21 @@ def test_cisco_to_juniper_if_direct_uses_ge_for_ex4100_48mp_high_ports():
         derived_vc_members=1,
     )
     assert out == "ge-0/0/16"
+
+
+def test_cisco_to_juniper_if_direct_maps_24_port_sfp_range_to_uplink_xe():
+    out = cisco_to_juniper_if_direct(
+        "GigabitEthernet1/0/25",
+        member_models={1: "ex4100-24mp"},
+        derived_vc_members=1,
+    )
+    assert out == "xe-0/2/0"
+
+
+def test_cisco_to_juniper_if_direct_maps_48_port_sfp_range_to_uplink_xe():
+    out = cisco_to_juniper_if_direct(
+        "GigabitEthernet1/0/49",
+        member_models={1: "ex4100-48mp"},
+        derived_vc_members=1,
+    )
+    assert out == "xe-0/2/0"

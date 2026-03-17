@@ -201,6 +201,16 @@ def cisco_to_juniper_if_direct(
     local_idx = max(nums[-1] - 1, 0) + int(port_offset or 0)
 
     model = member_models.get(src_member_1b, "ex4100-48mp")
+    model_l = str(model or "").lower()
+
+    # Some 24/48-port Cisco models expose SFP uplinks in the same module as
+    # access ports (e.g. Gi1/0/25-28 or Gi1/0/49-52). Map these to xe uplinks
+    # instead of wrapping back onto access ports.
+    if "24" in model_l and 24 <= local_idx <= 27:
+        return f"xe-{fpc}/2/{local_idx - 24}"
+    if "48" in model_l and 48 <= local_idx <= 51:
+        return f"xe-{fpc}/2/{local_idx - 48}"
+
     dest_ppm = _dest_ports_per_member(model)
 
     if strict_overflow and local_idx >= dest_ppm:
