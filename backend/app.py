@@ -4114,6 +4114,33 @@ def _parse_config_cmd_interfaces(cli_lines: Sequence[str]) -> List[Dict[str, Any
     return interfaces
 
 
+
+def _normalize_access_port_name_for_model(ifname: str, model: Optional[str]) -> str:
+    """Normalize ge/mge prefix on PIC 0 based on known model cutoffs."""
+    m = pm.MIST_IF_RE.match(str(ifname or "").strip())
+    if not m:
+        return ifname
+
+    itype = m.group("type")
+    pic = int(m.group("pic"))
+    port = int(m.group("port"))
+    member = int(m.group("member"))
+    if pic != 0 or itype not in {"ge", "mge"}:
+        return ifname
+
+    mk = pm._model_key(model)
+    if mk in {"EX4100-24", "EX4100-24MP"}:
+        cutoff = 8
+    elif mk in {"EX4100-48", "EX4100-48MP"}:
+        cutoff = 16
+    else:
+        return ifname
+
+    expected_type = "mge" if port < cutoff else "ge"
+    if expected_type == itype:
+        return ifname
+    return f"{expected_type}-{member}/{pic}/{port}"
+
 def _derive_port_config_from_config_cmd(
     base_url: str,
     token: str,
@@ -4190,7 +4217,8 @@ def _derive_port_config_from_config_cmd(
         mk = pm._model_key(model)
         caps = pm.MODEL_CAPS.get(mk) if mk else None
         if not caps:
-            filtered[ifname] = cfg
+            normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
+            filtered[normalized_ifname] = cfg
             continue
         pic = int(m.group("pic"))
         port = int(m.group("port"))
@@ -4198,7 +4226,8 @@ def _derive_port_config_from_config_cmd(
             continue
         if pic == 2 and port >= caps.get("uplink_pic2", 0):
             continue
-        filtered[ifname] = cfg
+        normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
+        filtered[normalized_ifname] = cfg
     return filtered
 
 
@@ -4221,6 +4250,32 @@ def _derive_port_config_from_port_profiles(
     )
     if not isinstance(device_info, Mapping):
         return {}
+
+    device_model: Optional[str] = None
+    member_models: Dict[int, Optional[str]] = {}
+    raw_model = device_info.get("model")
+    if isinstance(raw_model, str) and raw_model.strip():
+        device_model = raw_model.strip()
+    vc_data = device_info.get("virtual_chassis")
+    members: Optional[Sequence[Any]] = None
+    if isinstance(vc_data, Mapping):
+        maybe_members = vc_data.get("members") or vc_data.get("devices")
+        if isinstance(maybe_members, Sequence) and not isinstance(maybe_members, (str, bytes, bytearray)):
+            members = maybe_members
+    elif isinstance(vc_data, Sequence) and not isinstance(vc_data, (str, bytes, bytearray)):
+        members = vc_data
+    if members:
+        for member in members:
+            if not isinstance(member, Mapping):
+                continue
+            member_id = _int_or_none(member.get("member_id") or member.get("member") or member.get("id") or member.get("slot"))
+            if member_id is None:
+                continue
+            member_model = member.get("model") or member.get("device_model")
+            if isinstance(member_model, str) and member_model.strip():
+                member_models[member_id] = member_model.strip()
+            else:
+                member_models[member_id] = None
 
     port_config = device_info.get("port_config")
     if not isinstance(port_config, Mapping):
@@ -4290,6 +4345,14 @@ def _derive_port_config_from_port_profiles(
             continue
         if not isinstance(entry, Mapping):
             continue
+
+        normalized_port_id = port_id
+        port_match = pm.MIST_IF_RE.match(port_id)
+        if port_match:
+            member = int(port_match.group("member"))
+            model_for_port = member_models.get(member) or device_model
+            normalized_port_id = _normalize_access_port_name_for_model(port_id, model_for_port)
+
         usage_name = str(entry.get("usage") or "").strip()
         if usage_name and usage_name in preserve_usage_names:
             preserved_entry = _compact_dict(dict(entry))
@@ -4315,8 +4378,8 @@ def _derive_port_config_from_port_profiles(
         networks = usage_config.get("networks") or usage_config.get("dynamic_vlan_networks") or []
 
         intf = {
-            "name": port_id,
-            "juniper_if": port_id,
+            "name": normalized_port_id,
+            "juniper_if": normalized_port_id,
             "mode": usage_config.get("mode"),
             "description": entry.get("description") or usage_config.get("description"),
             "port_network": port_network,
