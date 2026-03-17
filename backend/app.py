@@ -3837,6 +3837,8 @@ def _build_site_cleanup_payload_for_setting(
                 keep = True
             if not keep and _usage_name_targets_legacy(usage_value, legacy_vlan_ids):
                 keep = True
+            if not keep and _port_usage_references_networks(cfg, preserved_network_names):
+                keep = True
             if keep:
                 preserved_port_config[port_key] = _compact_dict(dict(cfg))
 
@@ -4354,12 +4356,11 @@ def _derive_port_config_from_port_profiles(
         usage_name = str(entry.get("usage") or "").strip()
         if usage_name and usage_name in preserve_usage_names:
             preserved_entry = _compact_dict(dict(entry))
-            derived_config[normalized_port_id] = preserved_entry
+            derived_config[port_id] = preserved_entry
             if include_decisions:
                 decisions.append(
                     {
-                        "port_id": normalized_port_id,
-                        "original_port_id": port_id,
+                        "port_id": port_id,
                         "source_usage": usage_name,
                         "result_usage": str(preserved_entry.get("usage") or usage_name or ""),
                         "preserved": True,
@@ -4418,14 +4419,13 @@ def _derive_port_config_from_port_profiles(
                 break
 
         result_usage = str(chosen_usage or "blackhole")
-        derived_config[normalized_port_id] = {
+        derived_config[port_id] = {
             "usage": result_usage,
         }
         if include_decisions:
             decisions.append(
                 {
-                    "port_id": normalized_port_id,
-                    "original_port_id": port_id,
+                    "port_id": port_id,
                     "source_usage": usage_name,
                     "result_usage": result_usage,
                     "preserved": False,

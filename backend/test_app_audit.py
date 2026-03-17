@@ -622,7 +622,7 @@ def test_cleanup_payload_preserves_legacy_usage_name(app_module):
     assert cleanup["port_config"] == {"ge-0/0/20": {"usage": "legacy_AUTO_ACCESS_V10_POE_EDGE"}}
 
 
-def test_cleanup_payload_does_not_preserve_network_only_trunk_port_config(app_module):
+def test_cleanup_payload_preserves_network_only_trunk_port_config(app_module):
     settings = {
         "networks": {
             "legacy_net": {"vlan_id": 10, "note": "keep"},
@@ -646,7 +646,13 @@ def test_cleanup_payload_does_not_preserve_network_only_trunk_port_config(app_mo
     )
 
     assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
-    assert cleanup["port_config"] == {}
+    assert cleanup["port_config"] == {
+        "ge-0/0/10": {
+            "mode": "trunk",
+            "native_network": "legacy_net",
+            "networks": ["legacy_net"],
+        }
+    }
 
 
 def test_cleanup_payload_preserves_all_networks_trunk(app_module):
