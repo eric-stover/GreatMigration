@@ -730,6 +730,44 @@ def test_derive_port_config_normalizes_access_prefixes_by_model(monkeypatch, app
     assert derived["ge-0/0/23"]["usage"] == "end_user"
     assert derived["xe-0/2/1"]["usage"] == "end_user"
 
+
+def test_derive_port_config_uses_model_hint_when_device_model_unknown(monkeypatch, app_module):
+    device_info = {
+        "model": "EX4100",
+        "port_config": {
+            "mge-0/0/9": {"usage": "AUTO_ACCESS"},
+        },
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        model_hint="EX4100-24MP",
+    )
+
+    assert "mge-0/0/9" not in derived
+    assert derived["ge-0/0/9"]["usage"] == "end_user"
+
 def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     device_info = {
         "port_config": {

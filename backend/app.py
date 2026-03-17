@@ -4236,6 +4236,7 @@ def _derive_port_config_from_port_profiles(
     token: str,
     site_id: str,
     device_id: str,
+    model_hint: Optional[str] = None,
     preserve_usage_names: Optional[Set[str]] = None,
     include_decisions: bool = False,
 ) -> Dict[str, Any]:
@@ -4350,13 +4351,18 @@ def _derive_port_config_from_port_profiles(
         port_match = pm.MIST_IF_RE.match(port_id)
         if port_match:
             member = int(port_match.group("member"))
-            model_for_port = member_models.get(member) or device_model
+            model_for_port = member_models.get(member) or device_model or model_hint
+            if model_hint:
+                selected_model_key = pm._model_key(model_for_port)
+                hinted_model_key = pm._model_key(model_hint)
+                if hinted_model_key in pm.MODEL_CAPS and selected_model_key not in pm.MODEL_CAPS:
+                    model_for_port = model_hint
             normalized_port_id = _normalize_access_port_name_for_model(port_id, model_for_port)
 
         usage_name = str(entry.get("usage") or "").strip()
         if usage_name and usage_name in preserve_usage_names:
             preserved_entry = _compact_dict(dict(entry))
-            derived_config[port_id] = preserved_entry
+            derived_config[normalized_port_id] = preserved_entry
             if include_decisions:
                 decisions.append(
                     {
@@ -4419,7 +4425,7 @@ def _derive_port_config_from_port_profiles(
                 break
 
         result_usage = str(chosen_usage or "blackhole")
-        derived_config[port_id] = {
+        derived_config[normalized_port_id] = {
             "usage": result_usage,
         }
         if include_decisions:
@@ -4923,12 +4929,14 @@ def _remove_temporary_config_for_rows(
         if not site_id or not device_id:
             continue
         preserve_usages = preserved_usage_names_by_site.get(site_id, set())
+        model_hint = str(row.get("_model_hint") or "").strip() or None
         try:
             derived_result = _derive_port_config_from_port_profiles(
                 base_url,
                 token,
                 site_id,
                 device_id,
+                model_hint=model_hint,
                 preserve_usage_names=preserve_usages,
                 include_decisions=True,
             )
@@ -5359,6 +5367,8 @@ async def api_push_batch(
                 row_result["row_index"] = i
                 row_result["site_id"] = site_id
                 row_result["device_id"] = device_id
+                if isinstance(row_model_override, str) and row_model_override.strip():
+                    row_result["_model_hint"] = row_model_override.strip()
                 payload_for_reuse = row_result.get("payload")
                 if isinstance(payload_for_reuse, Mapping):
                     row_result["_site_deployment_payload"] = copy.deepcopy(payload_for_reuse)
@@ -5510,6 +5520,7 @@ async def api_push_batch(
         if isinstance(row, dict):
             row.pop("_temp_config_source", None)
             row.pop("_site_deployment_payload", None)
+            row.pop("_model_hint", None)
 
     top_ok = all(r.get("ok") for r in results) if results else False
     phase_ok = all(status.get("ok") or status.get("skipped") for status in phase_status.values())
