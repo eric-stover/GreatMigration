@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ciscoconfparse import CiscoConfParse
 
-TARGET_MODELS = {"ex4100-48mp", "ex4100-24mp"}
 
 # ----------------------------
 # Parsing & classification (number-driven)
@@ -134,20 +133,6 @@ def parse_show_power_inline(raw_text: str) -> Dict[str, float]:
 # ----------------------------
 # Model layout helpers
 # ----------------------------
-def _dest_ports_per_member(model: str) -> int:
-    return 48 if model.lower() == "ex4100-48mp" else 24
-
-def _dest_prefix_for_model(model: str, local_port_idx: int) -> str:
-    m = model.lower()
-    if m == "ex4100-48mp":
-        return "mge" if 0 <= local_port_idx <= 15 else "ge"
-    elif m == "ex4100-24mp":
-        return "mge" if 0 <= local_port_idx <= 7 else "ge"
-    return "ge"
-
-# ----------------------------
-# Mapping (module-driven logic)
-# ----------------------------
 def _looks_like_uplink_by_module(nums: List[int], uplink_module: int) -> bool:
     """Uplink if we have member/module/port AND module == uplink_module."""
     return len(nums) >= 3 and nums[1] == uplink_module
@@ -197,18 +182,12 @@ def cisco_to_juniper_if_direct(
     fpc = src_member_1b - 1
     local_idx = max(nums[-1] - 1, 0) + int(port_offset or 0)
 
-    model = member_models.get(src_member_1b, "ex4100-48mp")  # safe default
-    dest_ppm = _dest_ports_per_member(model)
+    if strict_overflow and local_idx < 0:
+        raise ValueError(f"[OVERFLOW] {name} -> invalid local_idx {local_idx}")
 
-    if strict_overflow and local_idx >= dest_ppm:
-        raise ValueError(
-            f"[OVERFLOW] {name} -> local_idx {local_idx}, but {model} has only {dest_ppm} access ports"
-        )
-    # Keep readable even if strict is off
-    local_idx = local_idx % dest_ppm
-
-    prefix = _dest_prefix_for_model(model, local_idx)
-    return f"{prefix}-{fpc}/0/{local_idx}"
+    # Model-agnostic provisional mapping. Final destination interface selection
+    # is resolved dynamically from Mist if_stat during push/preview.
+    return f"ge-{fpc}/0/{local_idx}"
 
 # ----------------------------
 # Inference: per-member model + VC size
@@ -237,13 +216,10 @@ def infer_member_models(conf: CiscoConfParse, uplink_module: int) -> Dict[int, s
 
     member_models: Dict[int, str] = {}
     for member, max_port in per_member_max.items():
-        member_models[member] = "ex4100-24mp" if max_port <= 24 else "ex4100-48mp"
+        member_models[member] = f"observed-max-port:{max_port}"
 
-    # If a member had no access ports (only uplinks), assume 48MP for safety.
-    # This keeps mapping valid even for uplink-only configs.
     if not member_models:
-        # No data at all? default member 1 → 48MP
-        member_models[1] = "ex4100-48mp"
+        member_models[1] = "observed-max-port:unknown"
 
     return member_models
 
@@ -290,10 +266,8 @@ def convert_one_file(
     if derived_vc_members < 1:
         derived_vc_members = 1
 
-    if force_model and force_model.lower() not in TARGET_MODELS:
-        raise ValueError(f"--force-model must be one of {sorted(TARGET_MODELS)}")
     if force_model:
-        member_models = {m: force_model.lower() for m in range(1, derived_vc_members + 1)}
+        member_models = {m: str(force_model).lower() for m in range(1, derived_vc_members + 1)}
     else:
         member_models = infer_member_models(conf, uplink_module=uplink_module)
 

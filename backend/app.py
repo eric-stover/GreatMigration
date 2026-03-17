@@ -2154,8 +2154,71 @@ def _build_payload_for_row(
             ]
             temp_source["interfaces"] = filtered_interfaces
 
+    # Keep only interfaces that actually exist on the claimed destination switch.
+    available_physical_ports: Optional[Set[str]] = None
+    unavailable_ports: List[str] = []
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    try:
+        available_physical_ports = _get_switch_physical_ports(base_url, headers, site_id, device_id)
+    except Exception:
+        available_physical_ports = None
+
+    if available_physical_ports is not None:
+        dynamic_port_map: Dict[str, str] = {}
+        if isinstance(temp_source, dict) and isinstance(temp_source.get("interfaces"), list):
+            dynamic_port_map = _build_dynamic_destination_port_map(
+                temp_source.get("interfaces", []),
+                available_physical_ports,
+            )
+
+        filtered_port_config: Dict[str, Dict[str, Any]] = {}
+        for ifname, cfg in port_config.items():
+            if not pm.MIST_IF_RE.match(ifname):
+                filtered_port_config[ifname] = cfg
+                continue
+
+            resolved_ifname = dynamic_port_map.get(ifname)
+            if not resolved_ifname:
+                resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports)
+            if not resolved_ifname:
+                unavailable_ports.append(ifname)
+                continue
+            filtered_port_config[resolved_ifname] = cfg
+        port_config = filtered_port_config
+
+        if isinstance(temp_source, dict) and isinstance(temp_source.get("interfaces"), list):
+            filtered_interfaces = []
+            for intf in temp_source.get("interfaces", []):
+                if not isinstance(intf, Mapping):
+                    continue
+                ifname = str(intf.get("juniper_if") or "").strip()
+                if not pm.MIST_IF_RE.match(ifname):
+                    filtered_interfaces.append(intf)
+                    continue
+                resolved_ifname = dynamic_port_map.get(ifname)
+                if not resolved_ifname:
+                    resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports)
+                if not resolved_ifname:
+                    continue
+                updated = dict(intf)
+                updated["juniper_if"] = resolved_ifname
+                filtered_interfaces.append(updated)
+            temp_source["interfaces"] = filtered_interfaces
+
     # Capacity validation (block live push; warn on dry-run)
     validation = validate_port_config_against_model(port_config, model)
+    if unavailable_ports:
+        validation.setdefault("warnings", []).append(
+            "Skipped %d mapped interface(s) not present in destination switch if_stat: %s"
+            % (
+                len(unavailable_ports),
+                ", ".join(sorted(unavailable_ports)[:10]) + (" …" if len(unavailable_ports) > 10 else ""),
+            )
+        )
 
     # Timestamp descriptions
     ts = timestamp_str(tz)
@@ -4146,6 +4209,144 @@ def _normalize_access_port_name_for_model(ifname: str, model: Optional[str]) -> 
         return ifname
     return f"{expected_type}-{member}/{pic}/{port}"
 
+
+def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
+    """Return normalized physical switch port IDs from Mist ``if_stat`` payload."""
+    if not isinstance(if_stat, Mapping):
+        return set()
+
+    physical_ports: Set[str] = set()
+    for key, value in if_stat.items():
+        port_id: str = ""
+        if isinstance(value, Mapping):
+            raw_port_id = value.get("port_id")
+            if isinstance(raw_port_id, str):
+                port_id = raw_port_id.strip()
+        if not port_id and isinstance(key, str):
+            port_id = key.split(".", 1)[0].strip()
+        if not port_id:
+            continue
+        if pm.MIST_IF_RE.match(port_id):
+            physical_ports.add(port_id)
+    return physical_ports
+
+
+
+def _resolve_interface_name_from_available_ports(
+    ifname: str,
+    available_physical_ports: Set[str],
+) -> Optional[str]:
+    """Resolve an interface name to an available physical port ID.
+
+    Resolution is data-driven from destination switch interfaces and avoids
+    model-specific assumptions.
+    """
+    candidate = str(ifname or "").strip()
+    if not candidate:
+        return None
+    if candidate in available_physical_ports:
+        return candidate
+
+    m = pm.MIST_IF_RE.match(candidate)
+    if not m:
+        return None
+
+    itype = m.group("type")
+    if itype in {"ge", "mge"}:
+        alt_type = "ge" if itype == "mge" else "mge"
+        alt = f"{alt_type}-{m.group('member')}/{m.group('pic')}/{m.group('port')}"
+        if alt in available_physical_ports:
+            return alt
+
+    return None
+
+
+def _get_switch_physical_ports(
+    base_url: str,
+    headers: Mapping[str, str],
+    site_id: str,
+    device_id: str,
+) -> Optional[Set[str]]:
+    stats = _mist_get_json(
+        base_url,
+        headers,
+        f"/sites/{site_id}/stats/devices/{device_id}?type=switch",
+        optional=True,
+    )
+    if not isinstance(stats, Mapping):
+        return None
+
+    if_stat = stats.get("if_stat")
+    ports = _extract_physical_port_ids_from_if_stat(if_stat)
+    return ports if ports else None
+
+def _build_dynamic_destination_port_map(
+    temp_interfaces: Sequence[Any],
+    available_physical_ports: Set[str],
+) -> Dict[str, str]:
+    """Map converted interface names to destination ports using source numbering.
+
+    Uses Cisco source interface numbering from ``interfaces[*].name`` and maps to
+    destination physical ports discovered from Mist ``if_stat.port_id``.
+    """
+    parsed_dest: Dict[Tuple[int, int], str] = {}
+    by_member: Dict[int, List[Tuple[int, str]]] = {}
+    for ifname in sorted(available_physical_ports):
+        m = pm.MIST_IF_RE.match(ifname)
+        if not m:
+            continue
+        member = int(m.group("member"))
+        pic = int(m.group("pic"))
+        port = int(m.group("port"))
+        if pic == 0 and (member, port) not in parsed_dest:
+            parsed_dest[(member, port)] = ifname
+        by_member.setdefault(member, []).append((port, ifname))
+
+    for member in by_member:
+        by_member[member].sort(key=lambda item: (item[0], item[1]))
+
+    def _extract_source_member_port(source_name: str) -> Optional[Tuple[int, int]]:
+        text = str(source_name or "").strip()
+        mist_match = pm.MIST_IF_RE.match(text)
+        if mist_match:
+            return (int(mist_match.group("member")), int(mist_match.group("port")))
+
+        nums = [int(x) for x in re.findall(r"\d+", text)]
+        if not nums:
+            return None
+        return (max(nums[0] - 1, 0), max(nums[-1] - 1, 0))
+
+    mapping: Dict[str, str] = {}
+    used_dest: Set[str] = set()
+
+    for entry in temp_interfaces:
+        if not isinstance(entry, Mapping):
+            continue
+        src_key = str(entry.get("juniper_if") or entry.get("name") or "").strip()
+        if not src_key:
+            continue
+
+        src_pair = _extract_source_member_port(str(entry.get("name") or ""))
+        candidate: Optional[str] = None
+        if src_pair is not None:
+            candidate = parsed_dest.get(src_pair)
+            if candidate is None:
+                member, port = src_pair
+                member_ports = by_member.get(member) or []
+                if 0 <= port < len(member_ports):
+                    candidate = member_ports[port][1]
+
+        if candidate is None:
+            candidate = _resolve_interface_name_from_available_ports(src_key, available_physical_ports)
+
+        if not candidate or candidate in used_dest:
+            continue
+        mapping[src_key] = candidate
+        used_dest.add(candidate)
+
+    return mapping
+
+
 def _derive_port_config_from_config_cmd(
     base_url: str,
     token: str,
@@ -4205,7 +4406,13 @@ def _derive_port_config_from_config_cmd(
     if not port_config:
         return port_config
 
-    if not device_model and not member_models:
+    physical_ports: Optional[Set[str]] = None
+    try:
+        physical_ports = _get_switch_physical_ports(base_url, headers, site_id, device_id)
+    except Exception:
+        physical_ports = None
+
+    if not device_model and not member_models and not physical_ports:
         return port_config
 
     allowed_members = set(member_models.keys()) if member_models else {0}
@@ -4218,21 +4425,21 @@ def _derive_port_config_from_config_cmd(
         member = int(m.group("member"))
         if member not in allowed_members:
             continue
-        model = member_models.get(member) or device_model
-        mk = pm._model_key(model)
-        caps = pm.MODEL_CAPS.get(mk) if mk else None
-        if not caps:
-            normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
-            filtered[normalized_ifname] = cfg
+
+        if physical_ports is not None:
+            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, physical_ports)
+            if not resolved_ifname:
+                continue
+            filtered[resolved_ifname] = cfg
             continue
-        pic = int(m.group("pic"))
-        port = int(m.group("port"))
-        if pic == 0 and port >= caps["access_pic0"]:
-            continue
-        if pic == 2 and port >= caps.get("uplink_pic2", 0):
-            continue
-        normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
-        filtered[normalized_ifname] = cfg
+
+        filtered[ifname] = cfg
+
+    if not filtered and physical_ports is not None:
+        for ifname, cfg in port_config.items():
+            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, physical_ports)
+            if resolved_ifname:
+                filtered[resolved_ifname] = cfg
     return filtered
 
 
