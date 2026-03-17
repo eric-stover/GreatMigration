@@ -837,7 +837,7 @@ def test_build_payload_for_row_filters_ports_not_present_in_if_stat(monkeypatch,
     payload_port_config = result["payload"]["port_config"]
     assert set(payload_port_config.keys()) == {"ge-0/0/0", "ge-0/0/1"}
     warnings = result["validation"].get("warnings", [])
-    assert any("not present in destination switch if_stat" in w for w in warnings)
+    assert any("not present in destination switch interface inventory" in w for w in warnings)
 
 
 def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatch, app_module):
@@ -874,7 +874,7 @@ def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatc
     payload_port_config = result["payload"]["port_config"]
     assert set(payload_port_config.keys()) == {"ge-0/0/8", "ge-0/0/9"}
     warnings = result["validation"].get("warnings", [])
-    assert not any("not present in destination switch if_stat" in w for w in warnings)
+    assert not any("not present in destination switch interface inventory" in w for w in warnings)
 
 
 
@@ -1129,7 +1129,7 @@ def test_load_site_history_parses_breakdown(tmp_path):
     assert history["Unknown"].run_count == 0
 
 
-def test_get_switch_physical_ports_for_model_uses_netbox_library(monkeypatch, app_module):
+def test_get_switch_physical_ports_for_model_uses_direct_model_yaml_lookup(monkeypatch, app_module):
     app_module._NETBOX_DEVICE_TYPE_URL_CACHE.clear()
     app_module._NETBOX_MODEL_PORT_CACHE.clear()
 
@@ -1142,31 +1142,28 @@ def test_get_switch_physical_ports_for_model_uses_netbox_library(monkeypatch, ap
         def json(self):
             return self._payload
 
+    calls: list[str] = []
+
     def fake_get(url: str, timeout: int = 60):
-        if url == app_module.NETBOX_JUNIPER_DEVICETYPE_INDEX_URL:
-            return _Resp(
-                200,
-                payload=[
-                    {
-                        "name": "EX4100-48MP.yaml",
-                        "download_url": "https://example.test/EX4100-48MP.yaml",
-                    }
-                ],
-            )
-        if url == "https://example.test/EX4100-48MP.yaml":
+        calls.append(url)
+        if url.endswith("/device-types/Juniper/EX4100-48MP.yaml"):
             return _Resp(
                 200,
                 text="""interfaces:
-  - name: ge-0/0/0
-  - name: ge-0/0/1
+  - name: mge-0/0/0
+  - name: ge-0/0/16
+  - name: xe-0/2/0
 console-ports:
   - name: con0
 """,
             )
+        if url == app_module.NETBOX_JUNIPER_DEVICETYPE_INDEX_URL:
+            return _Resp(500, payload={})
         return _Resp(404, payload={})
 
     monkeypatch.setattr(app_module.requests, "get", fake_get)
 
     ports = app_module._get_switch_physical_ports_for_model("EX4100-48MP")
 
-    assert ports == {"ge-0/0/0", "ge-0/0/1"}
+    assert ports == {"mge-0/0/0", "ge-0/0/16", "xe-0/2/0"}
+    assert any(url.endswith("/device-types/Juniper/EX4100-48MP.yaml") for url in calls)

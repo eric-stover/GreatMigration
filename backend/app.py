@@ -2219,7 +2219,7 @@ def _build_payload_for_row(
     validation = validate_port_config_against_model(port_config, model)
     if unavailable_ports:
         validation.setdefault("warnings", []).append(
-            "Skipped %d mapped interface(s) not present in destination switch if_stat: %s"
+            "Skipped %d mapped interface(s) not present in destination switch interface inventory: %s"
             % (
                 len(unavailable_ports),
                 ", ".join(sorted(unavailable_ports)[:10]) + (" …" if len(unavailable_ports) > 10 else ""),
@@ -4253,27 +4253,53 @@ def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[s
     if model_key in _NETBOX_MODEL_PORT_CACHE:
         return set(_NETBOX_MODEL_PORT_CACHE[model_key])
 
-    download_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
-    if model_key not in _NETBOX_DEVICE_TYPE_URL_CACHE:
-        index_map = _load_netbox_juniper_model_download_urls()
-        _NETBOX_DEVICE_TYPE_URL_CACHE.update({k: v for k, v in index_map.items() if k not in _NETBOX_DEVICE_TYPE_URL_CACHE})
-        download_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
-        if download_url is None:
-            # fallback: try direct predictable path
-            guessed = f"https://raw.githubusercontent.com/netbox-community/devicetype-library/master/device-types/Juniper/{model_key}.yaml"
-            _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = guessed
-            download_url = guessed
+    # Prefer deterministic direct model lookup first (based on Mist model field),
+    # then fall back to index-discovered download URLs.
+    candidate_urls: List[str] = []
+    cached_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
+    if cached_url:
+        candidate_urls.append(cached_url)
+    direct_url = (
+        "https://raw.githubusercontent.com/netbox-community/devicetype-library/master/"
+        f"device-types/Juniper/{model_key}.yaml"
+    )
+    if direct_url not in candidate_urls:
+        candidate_urls.append(direct_url)
 
+    for url in candidate_urls:
+        try:
+            resp = requests.get(url, timeout=60)
+        except Exception:
+            continue
+        if not (200 <= resp.status_code < 300):
+            continue
+        ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
+        if not ports:
+            continue
+        _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = url
+        _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
+        return set(ports)
+
+    try:
+        index_map = _load_netbox_juniper_model_download_urls()
+    except Exception:
+        return None
+
+    download_url = index_map.get(model_key)
     if not download_url:
         return None
 
-    resp = requests.get(download_url, timeout=60)
+    try:
+        resp = requests.get(download_url, timeout=60)
+    except Exception:
+        return None
     if not (200 <= resp.status_code < 300):
         return None
 
     ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
     if not ports:
         return None
+    _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = download_url
     _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
     return set(ports)
 
