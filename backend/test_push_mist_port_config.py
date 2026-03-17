@@ -1,6 +1,11 @@
 import pytest
 
-from push_mist_port_config import evaluate_rule, validate_rules_doc
+from push_mist_port_config import (
+    cisco_to_ex_if_enhanced,
+    evaluate_rule,
+    index_to_ex4100_if,
+    validate_rules_doc,
+)
 
 
 def test_evaluate_rule_matches_allowed_vlans_list():
@@ -98,3 +103,13 @@ def test_validate_rules_doc_rejects_invalid_poe_active_type():
 
     with pytest.raises(ValueError):
         validate_rules_doc(doc)
+
+
+def test_index_to_ex4100_if_supports_model_variants():
+    assert index_to_ex4100_if("EX4100-24MP-VC", 10) == "ge-0/0/9"
+    assert index_to_ex4100_if("EX4100-48MP Premium", 10) == "mge-0/0/9"
+
+
+def test_cisco_to_ex_if_enhanced_supports_model_variants():
+    assert cisco_to_ex_if_enhanced("EX4100-24MP Virtual Chassis", "GigabitEthernet1/0/10") == "ge-0/0/9"
+    assert cisco_to_ex_if_enhanced("EX4100-48MP Virtual Chassis", "GigabitEthernet1/0/10") == "mge-0/0/9"
