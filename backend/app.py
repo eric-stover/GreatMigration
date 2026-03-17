@@ -4464,6 +4464,47 @@ def _build_dynamic_destination_port_map(
     return mapping
 
 
+
+def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
+    """Return normalized physical switch port IDs from Mist ``if_stat`` payload."""
+    if not isinstance(if_stat, Mapping):
+        return set()
+
+    physical_ports: Set[str] = set()
+    for key, value in if_stat.items():
+        port_id: str = ""
+        if isinstance(value, Mapping):
+            raw_port_id = value.get("port_id")
+            if isinstance(raw_port_id, str):
+                port_id = raw_port_id.strip()
+        if not port_id and isinstance(key, str):
+            port_id = key.split(".", 1)[0].strip()
+        if not port_id:
+            continue
+        if pm.MIST_IF_RE.match(port_id):
+            physical_ports.add(port_id)
+    return physical_ports
+
+
+def _get_switch_physical_ports(
+    base_url: str,
+    headers: Mapping[str, str],
+    site_id: str,
+    device_id: str,
+) -> Optional[Set[str]]:
+    stats = _mist_get_json(
+        base_url,
+        headers,
+        f"/sites/{site_id}/stats/devices/{device_id}?type=switch",
+        optional=True,
+    )
+    if not isinstance(stats, Mapping):
+        return None
+
+    if_stat = stats.get("if_stat")
+    ports = _extract_physical_port_ids_from_if_stat(if_stat)
+    return ports if ports else None
+
 def _derive_port_config_from_config_cmd(
     base_url: str,
     token: str,
