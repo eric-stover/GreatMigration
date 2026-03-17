@@ -356,7 +356,9 @@ if static_path.exists():
 README_URL = "https://github.com/jacob-hopkins/GreatMigration#readme"
 # Where to send users when they click the help icon
 HELP_URL = os.getenv("HELP_URL", README_URL)
-RULES_PATH = Path(__file__).resolve().parent / "port_rules.json"
+RULES_REPO_PATH = Path(__file__).resolve().parent / "port_rules.json"
+RULES_LOCAL_PATH = Path(__file__).resolve().parent / "port_rules.local.json"
+RULES_SAMPLE_PATH = Path(__file__).resolve().parent / "port_rules.sample.json"
 REPLACEMENTS_PATH = Path(__file__).resolve().parent / "replacement_rules.json"
 NETBOX_DT_URL = os.getenv(
     "NETBOX_DT_URL",
@@ -1103,7 +1105,10 @@ def _gather_site_contexts(
 def api_get_rules():
     """Return current rule document."""
     try:
-        data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+        rules_path = RULES_LOCAL_PATH if RULES_LOCAL_PATH.exists() else RULES_REPO_PATH
+        if not rules_path.exists():
+            rules_path = RULES_SAMPLE_PATH
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
         return {"ok": True, "doc": data}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -1116,7 +1121,7 @@ def api_save_rules(request: Request, doc: Dict[str, Any] = Body(...)):
         # Ensure the request is from an authenticated user
         current_user(request)
         pm.validate_rules_doc(doc)
-        RULES_PATH.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        RULES_LOCAL_PATH.write_text(json.dumps(doc, indent=2), encoding="utf-8")
         pm.RULES_DOC = pm.load_rules()
         return {"ok": True}
     except ValueError as e:
