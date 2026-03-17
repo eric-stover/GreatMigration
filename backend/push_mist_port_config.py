@@ -304,9 +304,10 @@ def index_to_ex4100_if(model: Optional[str], index_1based: int) -> Optional[str]
     if index_1based is None or index_1based <= 0:
         return None
     p = index_1based - 1
-    if model and model.startswith("EX4100-48MP"):
+    mk = _model_key(model)
+    if mk == "EX4100-48MP":
         return f"mge-0/0/{p}" if 0 <= p <= 15 else f"ge-0/0/{p}"
-    if model and model.startswith("EX4100-24MP"):
+    if mk == "EX4100-24MP":
         return f"mge-0/0/{p}" if 0 <= p <= 7 else f"ge-0/0/{p}"
     return f"ge-0/0/{p}"
 
@@ -323,6 +324,7 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
         return None
     sw, mod, port = p["sw"], p["mod"], p["port"]
     member = max(sw - 1, 0)
+    mk = _model_key(model)
 
     if mod == 1:
         pic, jport = 2, port - 1
@@ -331,9 +333,9 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
 
     if mod == 0:
         pic, jport = 0, port - 1
-        if model and model.startswith("EX4100-48MP"):
+        if mk == "EX4100-48MP":
             itype = "mge" if 0 <= jport <= 15 else "ge"
-        elif model and model.startswith("EX4100-24MP"):
+        elif mk == "EX4100-24MP":
             itype = "mge" if 0 <= jport <= 7 else "ge"
         else:
             itype = "ge"
@@ -346,9 +348,9 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
         return f"{itype}-{member}/{pic}/{jport}"
 
     pic, jport = 0, port - 1
-    if model and model.startswith("EX4100-48MP"):
+    if mk == "EX4100-48MP":
         itype = "mge" if 0 <= jport <= 15 else "ge"
-    elif model and model.startswith("EX4100-24MP"):
+    elif mk == "EX4100-24MP":
         itype = "mge" if 0 <= jport <= 7 else "ge"
     else:
         itype = "ge"
@@ -506,7 +508,7 @@ def _model_key(model: Optional[str]) -> Optional[str]:
     if not model:
         return None
     m = model.strip().upper()
-    for k in MODEL_CAPS.keys():
+    for k in sorted(MODEL_CAPS.keys(), key=len, reverse=True):
         if m.startswith(k.upper()):
             return k
     return m
@@ -659,3 +661,4 @@ if __name__ == "__main__":
     except PortConfigError as exc:  # pragma: no cover - CLI convenience
         print(f"❌ {exc}")
         raise SystemExit(2)
+    mk = _model_key(model)
