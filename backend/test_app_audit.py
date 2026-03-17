@@ -766,6 +766,46 @@ def test_derive_port_config_uses_model_hint_when_device_model_unknown(monkeypatc
     assert derived["mge-0/0/9"]["usage"] == "end_user"
 
 
+
+
+def test_candidate_device_model_keys_trims_suffixes(app_module):
+    keys = app_module._candidate_device_model_keys("EX4100-48MP-VC")
+    assert keys[0] == "EX4100-48MP-VC"
+    assert "EX4100-48MP" in keys
+
+
+def test_get_switch_physical_ports_for_model_handles_model_suffixes(monkeypatch, app_module):
+    app_module._NETBOX_DEVICE_TYPE_URL_CACHE.clear()
+    app_module._NETBOX_MODEL_PORT_CACHE.clear()
+
+    class _Resp:
+        def __init__(self, status_code: int, payload=None, text: str = ""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url: str, timeout: int = 60):
+        if url.endswith("/EX4100-48MP-VC.yaml"):
+            return _Resp(404, payload={})
+        if url.endswith("/EX4100-48MP.yaml"):
+            return _Resp(
+                200,
+                text="""interfaces:
+  - name: mge-0/0/0
+  - name: ge-0/0/16
+""",
+            )
+        return _Resp(404, payload={})
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+
+    ports, err = app_module._get_switch_physical_ports_for_model_with_diagnostics("EX4100-48MP-VC")
+
+    assert err is None
+    assert ports == {"mge-0/0/0", "ge-0/0/16"}
 def test_extract_physical_port_ids_from_devicetype_yaml(app_module):
     yaml_text = """
 manufacturer: Juniper

@@ -4205,6 +4205,21 @@ def _normalize_device_model_key(model: Optional[str]) -> str:
     return text
 
 
+def _candidate_device_model_keys(model_key: str) -> List[str]:
+    """Return progressively generalized model keys for library lookup."""
+    key = _normalize_device_model_key(model_key)
+    if not key:
+        return []
+    keys: List[str] = [key]
+    parts = key.split("-")
+    while len(parts) > 2:
+        parts = parts[:-1]
+        candidate = "-".join(parts)
+        if candidate and candidate not in keys:
+            keys.append(candidate)
+    return keys
+
+
 def _load_netbox_juniper_model_download_urls() -> Dict[str, str]:
     resp = requests.get(NETBOX_JUNIPER_DEVICETYPE_INDEX_URL, timeout=60)
     if not (200 <= resp.status_code < 300):
@@ -4263,6 +4278,10 @@ def _get_switch_physical_ports_for_model_with_diagnostics(model: Optional[str]) 
     if model_key in _NETBOX_MODEL_PORT_CACHE:
         return set(_NETBOX_MODEL_PORT_CACHE[model_key]), None
 
+    model_keys = _candidate_device_model_keys(model_key)
+    if not model_keys:
+        return None, f"invalid device model key: {model}"
+
     attempted_urls: List[str] = []
 
     # Prefer deterministic direct model lookup first (based on Mist model field),
@@ -4271,10 +4290,11 @@ def _get_switch_physical_ports_for_model_with_diagnostics(model: Optional[str]) 
     cached_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
     if cached_url:
         candidate_urls.append(cached_url)
-    for base in NETBOX_JUNIPER_DEVICETYPE_RAW_BASES:
-        direct_url = f"{base}/{model_key}.yaml"
-        if direct_url not in candidate_urls:
-            candidate_urls.append(direct_url)
+    for mk in model_keys:
+        for base in NETBOX_JUNIPER_DEVICETYPE_RAW_BASES:
+            direct_url = f"{base}/{mk}.yaml"
+            if direct_url not in candidate_urls:
+                candidate_urls.append(direct_url)
 
     for url in candidate_urls:
         attempted_urls.append(url)
@@ -4296,7 +4316,11 @@ def _get_switch_physical_ports_for_model_with_diagnostics(model: Optional[str]) 
     except Exception as exc:
         return None, f"unable to load NetBox Juniper index ({exc}) for model {model_key}"
 
-    download_url = index_map.get(model_key)
+    download_url = None
+    for mk in model_keys:
+        if mk in index_map:
+            download_url = index_map[mk]
+            break
     if not download_url:
         attempted = ", ".join(attempted_urls[:2])
         return None, f"no NetBox device-type YAML found for model {model_key}; tried {attempted}"
