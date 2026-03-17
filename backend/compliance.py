@@ -15,6 +15,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 
 import requests
 
+from http_logging import install_http_logging
+
 from audit_actions import (
     AP_RENAME_ACTION_ID,
     CLEAR_DNS_OVERRIDE_ACTION_ID,
@@ -26,6 +28,8 @@ from logging_utils import get_user_logger
 
 
 logger = get_user_logger()
+
+install_http_logging()
 
 
 @dataclass
