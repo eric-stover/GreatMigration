@@ -4390,18 +4390,31 @@ def _derive_port_config_from_port_profiles(
         native_network = usage_config.get("native_network")
         networks = usage_config.get("networks") or usage_config.get("dynamic_vlan_networks") or []
 
+        data_vlan = _vlan_for_network(port_network)
+        native_vlan = _vlan_for_network(native_network)
+        mode_value = usage_config.get("mode")
+        if (
+            str(mode_value or "").strip().lower() == "trunk"
+            and native_vlan is None
+            and data_vlan is not None
+        ):
+            # Legacy AUTO_TRUNK profiles often only populate `port_network`.
+            # Treat that VLAN as native when explicit `native_network` is absent
+            # so trunk-native rules continue to match.
+            native_vlan = data_vlan
+
         intf = {
             "name": normalized_port_id,
             "juniper_if": normalized_port_id,
-            "mode": usage_config.get("mode"),
+            "mode": mode_value,
             "description": entry.get("description") or usage_config.get("description"),
             "port_network": port_network,
             "voip_network": voip_network,
             "native_network": native_network,
             "networks": networks,
-            "data_vlan": _vlan_for_network(port_network),
+            "data_vlan": data_vlan,
             "voice_vlan": _vlan_for_network(voip_network),
-            "native_vlan": _vlan_for_network(native_network),
+            "native_vlan": native_vlan,
             "allowed_vlans": _vlan_list_for_networks(networks),
         }
 
