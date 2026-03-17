@@ -3833,8 +3833,6 @@ def _build_site_cleanup_payload_for_setting(
                 keep = True
             if profile_value and profile_value in preserved_profile_names:
                 keep = True
-            if not keep and _port_usage_references_networks(cfg, preserved_network_names):
-                keep = True
             if not keep and _port_profile_targets_legacy(cfg, legacy_vlan_ids):
                 keep = True
             if not keep and _usage_name_targets_legacy(usage_value, legacy_vlan_ids):
@@ -4114,6 +4112,33 @@ def _parse_config_cmd_interfaces(cli_lines: Sequence[str]) -> List[Dict[str, Any
     return interfaces
 
 
+
+def _normalize_access_port_name_for_model(ifname: str, model: Optional[str]) -> str:
+    """Normalize ge/mge prefix on PIC 0 based on known model cutoffs."""
+    m = pm.MIST_IF_RE.match(str(ifname or "").strip())
+    if not m:
+        return ifname
+
+    itype = m.group("type")
+    pic = int(m.group("pic"))
+    port = int(m.group("port"))
+    member = int(m.group("member"))
+    if pic != 0 or itype not in {"ge", "mge"}:
+        return ifname
+
+    mk = pm._model_key(model)
+    if mk in {"EX4100-24", "EX4100-24MP"}:
+        cutoff = 8
+    elif mk in {"EX4100-48", "EX4100-48MP"}:
+        cutoff = 16
+    else:
+        return ifname
+
+    expected_type = "mge" if port < cutoff else "ge"
+    if expected_type == itype:
+        return ifname
+    return f"{expected_type}-{member}/{pic}/{port}"
+
 def _derive_port_config_from_config_cmd(
     base_url: str,
     token: str,
@@ -4190,7 +4215,8 @@ def _derive_port_config_from_config_cmd(
         mk = pm._model_key(model)
         caps = pm.MODEL_CAPS.get(mk) if mk else None
         if not caps:
-            filtered[ifname] = cfg
+            normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
+            filtered[normalized_ifname] = cfg
             continue
         pic = int(m.group("pic"))
         port = int(m.group("port"))
@@ -4198,7 +4224,8 @@ def _derive_port_config_from_config_cmd(
             continue
         if pic == 2 and port >= caps.get("uplink_pic2", 0):
             continue
-        filtered[ifname] = cfg
+        normalized_ifname = _normalize_access_port_name_for_model(ifname, model)
+        filtered[normalized_ifname] = cfg
     return filtered
 
 
@@ -4208,6 +4235,7 @@ def _derive_port_config_from_port_profiles(
     site_id: str,
     device_id: str,
     preserve_usage_names: Optional[Set[str]] = None,
+    include_decisions: bool = False,
 ) -> Dict[str, Any]:
     headers = _mist_headers(token)
     preserve_usage_names = set(preserve_usage_names or set())
@@ -4220,6 +4248,32 @@ def _derive_port_config_from_port_profiles(
     )
     if not isinstance(device_info, Mapping):
         return {}
+
+    device_model: Optional[str] = None
+    member_models: Dict[int, Optional[str]] = {}
+    raw_model = device_info.get("model")
+    if isinstance(raw_model, str) and raw_model.strip():
+        device_model = raw_model.strip()
+    vc_data = device_info.get("virtual_chassis")
+    members: Optional[Sequence[Any]] = None
+    if isinstance(vc_data, Mapping):
+        maybe_members = vc_data.get("members") or vc_data.get("devices")
+        if isinstance(maybe_members, Sequence) and not isinstance(maybe_members, (str, bytes, bytearray)):
+            members = maybe_members
+    elif isinstance(vc_data, Sequence) and not isinstance(vc_data, (str, bytes, bytearray)):
+        members = vc_data
+    if members:
+        for member in members:
+            if not isinstance(member, Mapping):
+                continue
+            member_id = _int_or_none(member.get("member_id") or member.get("member") or member.get("id") or member.get("slot"))
+            if member_id is None:
+                continue
+            member_model = member.get("model") or member.get("device_model")
+            if isinstance(member_model, str) and member_model.strip():
+                member_models[member_id] = member_model.strip()
+            else:
+                member_models[member_id] = None
 
     port_config = device_info.get("port_config")
     if not isinstance(port_config, Mapping):
@@ -4283,14 +4337,35 @@ def _derive_port_config_from_port_profiles(
     rules = pm.RULES_DOC.get("rules", []) if isinstance(pm.RULES_DOC, Mapping) else []
 
     derived_config: Dict[str, Dict[str, Any]] = {}
+    decisions: List[Dict[str, Any]] = []
     for port_id, entry in port_config.items():
         if not isinstance(port_id, str) or not port_id.strip():
             continue
         if not isinstance(entry, Mapping):
             continue
+
+        normalized_port_id = port_id
+        port_match = pm.MIST_IF_RE.match(port_id)
+        if port_match:
+            member = int(port_match.group("member"))
+            model_for_port = member_models.get(member) or device_model
+            normalized_port_id = _normalize_access_port_name_for_model(port_id, model_for_port)
+
         usage_name = str(entry.get("usage") or "").strip()
         if usage_name and usage_name in preserve_usage_names:
-            derived_config[port_id] = _compact_dict(dict(entry))
+            preserved_entry = _compact_dict(dict(entry))
+            derived_config[normalized_port_id] = preserved_entry
+            if include_decisions:
+                decisions.append(
+                    {
+                        "port_id": normalized_port_id,
+                        "original_port_id": port_id,
+                        "source_usage": usage_name,
+                        "result_usage": str(preserved_entry.get("usage") or usage_name or ""),
+                        "preserved": True,
+                        "reason": "usage name is in preserve_usage_names",
+                    }
+                )
             continue
         usage_config = port_usages.get(usage_name) if usage_name else None
         if not isinstance(usage_config, Mapping):
@@ -4302,8 +4377,8 @@ def _derive_port_config_from_port_profiles(
         networks = usage_config.get("networks") or usage_config.get("dynamic_vlan_networks") or []
 
         intf = {
-            "name": port_id,
-            "juniper_if": port_id,
+            "name": normalized_port_id,
+            "juniper_if": normalized_port_id,
             "mode": usage_config.get("mode"),
             "description": entry.get("description") or usage_config.get("description"),
             "port_network": port_network,
@@ -4317,22 +4392,54 @@ def _derive_port_config_from_port_profiles(
         }
 
         chosen_usage: Optional[str] = None
-        for rule in rules:
+        matched_rule_name: Optional[str] = None
+        evaluated_rules: List[Dict[str, Any]] = []
+        for idx, rule in enumerate(rules, 1):
             if not isinstance(rule, Mapping):
                 continue
             when = rule.get("when", {}) or {}
             if not isinstance(when, Mapping):
                 continue
-            if pm.evaluate_rule(when, intf):
+            matched = pm.evaluate_rule(when, intf)
+            if include_decisions:
+                evaluated_rules.append(
+                    {
+                        "index": idx,
+                        "name": str(rule.get("name") or f"rule-{idx}"),
+                        "matched": bool(matched),
+                        "when": dict(when),
+                    }
+                )
+            if matched:
                 set_cfg = rule.get("set", {}) or {}
                 if isinstance(set_cfg, Mapping):
                     chosen_usage = set_cfg.get("usage") or chosen_usage
+                matched_rule_name = str(rule.get("name") or f"rule-{idx}")
                 break
 
-        derived_config[port_id] = {
-            "usage": chosen_usage or "blackhole",
+        result_usage = str(chosen_usage or "blackhole")
+        derived_config[normalized_port_id] = {
+            "usage": result_usage,
         }
+        if include_decisions:
+            decisions.append(
+                {
+                    "port_id": normalized_port_id,
+                    "original_port_id": port_id,
+                    "source_usage": usage_name,
+                    "result_usage": result_usage,
+                    "preserved": False,
+                    "matched_rule": matched_rule_name,
+                    "interface": _compact_dict(dict(intf)),
+                    "evaluated_rules": evaluated_rules,
+                }
+            )
 
+    if include_decisions:
+        return {
+            "port_config": derived_config,
+            "decisions": decisions,
+        }
     return derived_config
 
 
@@ -4723,6 +4830,7 @@ def _remove_temporary_config_for_rows(
     preserve_legacy_vlans = bool(preserve_legacy_vlans and effective_legacy_vlan_ids)
 
     derived_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    derivation_decisions: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     derivation_warnings: Dict[Tuple[str, str], str] = {}
 
     def _collect_site_cleanup_targets(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -4816,13 +4924,35 @@ def _remove_temporary_config_for_rows(
             continue
         preserve_usages = preserved_usage_names_by_site.get(site_id, set())
         try:
-            port_config = _derive_port_config_from_port_profiles(
+            derived_result = _derive_port_config_from_port_profiles(
                 base_url,
                 token,
                 site_id,
                 device_id,
                 preserve_usage_names=preserve_usages,
+                include_decisions=True,
             )
+            port_config: Dict[str, Any] = {}
+            decisions: List[Dict[str, Any]] = []
+            if isinstance(derived_result, Mapping) and "port_config" in derived_result:
+                raw_pc = derived_result.get("port_config")
+                if isinstance(raw_pc, Mapping):
+                    port_config = dict(raw_pc)
+                raw_decisions = derived_result.get("decisions")
+                if isinstance(raw_decisions, list):
+                    decisions = [d for d in raw_decisions if isinstance(d, Mapping)]
+            elif isinstance(derived_result, Mapping):
+                port_config = dict(derived_result)
+
+            if decisions:
+                derivation_decisions[key] = decisions
+                action_logger.info(
+                    "lcm_step3_port_profile_decisions site=%s device=%s decisions=%s",
+                    site_id,
+                    device_id,
+                    json.dumps(decisions, separators=(",", ":"), default=str),
+                )
+
             if port_config:
                 derived_payloads[key] = {"port_config": port_config}
             else:
@@ -4843,6 +4973,9 @@ def _remove_temporary_config_for_rows(
                 "cleanup_request": copy.deepcopy(cleanup_payload),
                 "push_request": copy.deepcopy(final_payload) if isinstance(final_payload, Mapping) else {},
             }
+            decisions = derivation_decisions.get(key)
+            if decisions:
+                preview_payload["port_profile_decisions"] = decisions
             warn_text = derivation_warnings.get(key)
             if warn_text:
                 preview_payload["derivation_warning"] = warn_text
@@ -4853,6 +4986,7 @@ def _remove_temporary_config_for_rows(
                     "payload": {
                         "cleanup_request": cleanup_payload,
                         "push_request": final_payload,
+                        "port_profile_decisions": derivation_decisions.get(key, []),
                     },
                 }
             )

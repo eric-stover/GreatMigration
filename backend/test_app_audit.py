@@ -322,6 +322,93 @@ def test_apply_temp_config_payload_strips_port_assignments(monkeypatch, app_modu
     assert "port_overrides" not in preview_payload
 
 
+
+
+def test_finalize_assignments_preview_preserves_site_and_device_payloads(monkeypatch, app_module):
+    monkeypatch.setattr(
+        app_module,
+        "_prepare_switch_port_profile_payload",
+        lambda *args, **kwargs: (kwargs.get("payload") if "payload" in kwargs else args[3], [], {}),
+    )
+
+    row = {
+        "ok": True,
+        "site_id": "site-1",
+        "device_id": "device-1",
+        "_temp_config_source": {
+            "vlans": [{"id": 10, "name": "Data"}],
+            "interfaces": [
+                {
+                    "mode": "access",
+                    "data_vlan": 10,
+                    "juniper_if": "ge-0/0/1",
+                    "name": "Gig1",
+                }
+            ],
+        },
+    }
+
+    result = app_module._finalize_assignments_for_rows(
+        "https://example.com/api/v1",
+        "token",
+        [row],
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert result["total"] == 1
+    payloads = result.get("payloads") or []
+    assert len(payloads) == 1
+    record = payloads[0]
+    assert record.get("site_id") == "site-1"
+    assert record.get("device_payloads", {}).get("device-1", {}).get("port_config", {}).get("ge-0/0/1")
+
+
+def test_finalize_assignments_live_pushes_site_and_device(monkeypatch, app_module):
+    calls: list[Dict[str, Any]] = []
+
+    def fake_site_override(base_url: str, token: str, site_id: str, payload: Dict[str, Any]):
+        calls.append({"kind": "site", "site_id": site_id, "payload": payload})
+        return {"ok": True, "status": 200, "response": {"ok": True}}
+
+    def fake_put_device(base_url: str, token: str, site_id: str, device_id: str, payload: Dict[str, Any]):
+        calls.append({"kind": "device", "site_id": site_id, "device_id": device_id, "payload": payload})
+        return {"status": 200, "response": {"ok": True}}
+
+    monkeypatch.setattr(app_module, "_configure_switch_port_profile_override", fake_site_override)
+    monkeypatch.setattr(app_module, "_put_device_payload", fake_put_device)
+
+    row = {
+        "ok": True,
+        "site_id": "site-1",
+        "device_id": "device-1",
+        "_temp_config_source": {
+            "vlans": [{"id": 10, "name": "Data"}],
+            "interfaces": [
+                {
+                    "mode": "access",
+                    "data_vlan": 10,
+                    "juniper_if": "ge-0/0/1",
+                    "name": "Gig1",
+                }
+            ],
+        },
+    }
+
+    result = app_module._finalize_assignments_for_rows(
+        "https://example.com/api/v1",
+        "token",
+        [row],
+        dry_run=False,
+    )
+
+    assert result["ok"] is True
+    assert result["successes"] == 1
+    assert result["failures"] == []
+    assert [c["kind"] for c in calls] == ["site", "device"]
+    assert calls[1]["payload"].get("port_config", {}).get("ge-0/0/1")
+
 def test_remove_temp_config_returns_preview_when_dry_run(monkeypatch, app_module):
     def fake_get(url: str, headers=None, timeout: int = 60):
         class Resp:
@@ -345,7 +432,7 @@ def test_remove_temp_config_returns_preview_when_dry_run(monkeypatch, app_module
 
     monkeypatch.setattr(
         app_module,
-        "_derive_port_config_from_config_cmd",
+        "_derive_port_config_from_port_profiles",
         lambda *args, **kwargs: {"ge-0/0/1": {"usage": "derived_user"}},
     )
 
@@ -401,6 +488,11 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
 
     monkeypatch.setattr(app_module.requests, "put", fake_put)
     monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(
+        app_module,
+        "_derive_port_config_from_port_profiles",
+        lambda *args, **kwargs: {"ge-0/0/5": {"usage": "access"}},
+    )
 
     final_payload = {"port_config": {"ge-0/0/5": {"usage": "access"}}}
     row = {
@@ -420,17 +512,16 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
     assert result["ok"] is True
     assert result["successes"] == 1
     assert result["failures"] == []
-    assert len(calls) == 4
-    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/devices/device-1/config_cmd"
+    assert len(calls) == 3
+    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/setting"
     assert calls[1]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["json"] == {
+    assert calls[1]["json"] == {
         "networks": {},
         "port_usages": {},
         "port_config": {},
         "port_overrides": [],
     }
-    assert calls[3]["json"] == final_payload
+    assert calls[2]["json"] == final_payload
 
 
 def test_remove_temp_config_preserves_legacy_vlan(monkeypatch, app_module):
@@ -531,6 +622,33 @@ def test_cleanup_payload_preserves_legacy_usage_name(app_module):
     assert cleanup["port_config"] == {"ge-0/0/20": {"usage": "legacy_AUTO_ACCESS_V10_POE_EDGE"}}
 
 
+def test_cleanup_payload_does_not_preserve_network_only_trunk_port_config(app_module):
+    settings = {
+        "networks": {
+            "legacy_net": {"vlan_id": 10, "note": "keep"},
+            "temp_net": {"vlan_id": 200, "note": "drop"},
+        },
+        "switch": {
+            "port_config": {
+                "ge-0/0/10": {
+                    "mode": "trunk",
+                    "native_network": "legacy_net",
+                    "networks": ["legacy_net"],
+                }
+            }
+        },
+    }
+
+    cleanup = app_module._build_site_cleanup_payload_for_setting(
+        settings,
+        preserve_legacy_vlans=True,
+        legacy_vlan_ids={10},
+    )
+
+    assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
+    assert cleanup["port_config"] == {}
+
+
 def test_cleanup_payload_preserves_all_networks_trunk(app_module):
     settings = {
         "networks": {
@@ -554,6 +672,57 @@ def test_cleanup_payload_preserves_all_networks_trunk(app_module):
     assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
     assert cleanup.get("port_usages") == {"legacy_TRUNK_ALL": {"mode": "trunk", "all_networks": True}}
 
+
+
+
+def test_normalize_access_port_name_for_model_ex4100_24mp(app_module):
+    assert app_module._normalize_access_port_name_for_model("mge-0/0/9", "EX4100-24MP") == "ge-0/0/9"
+    assert app_module._normalize_access_port_name_for_model("mge-0/0/7", "EX4100-24MP") == "mge-0/0/7"
+    assert app_module._normalize_access_port_name_for_model("ge-0/0/2", "EX4100-24MP") == "mge-0/0/2"
+    assert app_module._normalize_access_port_name_for_model("xe-0/2/1", "EX4100-24MP") == "xe-0/2/1"
+
+
+def test_derive_port_config_normalizes_access_prefixes_by_model(monkeypatch, app_module):
+    device_info = {
+        "model": "EX4100-24MP",
+        "port_config": {
+            "mge-0/0/9": {"usage": "AUTO_ACCESS"},
+            "mge-0/0/23": {"usage": "AUTO_ACCESS"},
+            "xe-0/2/1": {"usage": "AUTO_UPLINK"},
+        },
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+            "AUTO_UPLINK": {"mode": "trunk"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+    )
+
+    assert "mge-0/0/9" not in derived
+    assert "mge-0/0/23" not in derived
+    assert derived["ge-0/0/9"]["usage"] == "end_user"
+    assert derived["ge-0/0/23"]["usage"] == "end_user"
+    assert derived["xe-0/2/1"]["usage"] == "end_user"
 
 def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     device_info = {
@@ -589,6 +758,51 @@ def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
 
     assert derived["ge-0/0/20"]["usage"] == "legacy_AUTO_ACCESS_V10_POE_EDGE"
     assert derived["ge-0/0/21"]["usage"] == "end_user"
+
+
+
+def test_derive_port_config_returns_decisions_when_requested(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "ge-0/0/1": {"usage": "legacy_keep"},
+            "ge-0/0/2": {"usage": "AUTO_ACCESS"},
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"name": "default-user", "when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        preserve_usage_names={"legacy_keep"},
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["ge-0/0/1"]["usage"] == "legacy_keep"
+    assert derived["port_config"]["ge-0/0/2"]["usage"] == "end_user"
+    decisions = derived.get("decisions")
+    assert isinstance(decisions, list)
+    assert len(decisions) == 2
+    assert any(d.get("preserved") is True and d.get("port_id") == "ge-0/0/1" for d in decisions)
+    assert any(d.get("matched_rule") == "default-user" and d.get("port_id") == "ge-0/0/2" for d in decisions)
 
 def test_load_site_history_parses_breakdown(tmp_path):
     from audit_history import load_site_history

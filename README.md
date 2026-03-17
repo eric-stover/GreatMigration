@@ -83,7 +83,7 @@ Port Profile Rules provide deterministic logic for assigning Mist port usages fr
 
 **What it does**
 
-- Lets you define rule conditions such as mode, VLAN fields, and description regex.
+- Lets you define rule conditions such as mode, VLAN fields, PoE active status, and description regex.
 - Uses ordered evaluation (first match wins).
 - Stores rules in JSON for version control and reuse.
 - Applies rules automatically during conversion and push preview.

@@ -81,6 +81,7 @@ def validate_rules_doc(doc: Dict[str, Any]) -> None:
         "voice_vlan",
         "native_vlan",
         "allowed_vlans",
+        "poe_active",
         "has_voice",
         "description_regex",
         "name_regex",
@@ -126,6 +127,8 @@ def validate_rules_doc(doc: Dict[str, Any]) -> None:
                     raise ValueError(f"Rule {idx} has invalid regex: {e}")
             if k == "has_voice" and not isinstance(v, bool):
                 raise ValueError("has_voice condition must be boolean")
+            if k == "poe_active" and not isinstance(v, bool):
+                raise ValueError("poe_active condition must be boolean")
             if k == "any" and not isinstance(v, bool):
                 raise ValueError("any condition must be boolean")
         setp = rule.get("set", {})
@@ -208,6 +211,19 @@ def evaluate_rule(when: Dict[str, Any], intf: Dict[str, Any]) -> bool:
     voice_vlan  = int(intf["voice_vlan"])  if intf.get("voice_vlan")  is not None else None
     native_vlan = int(intf["native_vlan"]) if intf.get("native_vlan") is not None else None
     allowed_vlans_set  = set(_normalize_vlan_list(intf.get("allowed_vlans")))
+    poe_active = intf.get("poe_active")
+    if poe_active is None:
+        poe_on = intf.get("poe_on")
+        if isinstance(poe_on, bool):
+            poe_active = poe_on
+        else:
+            power_draw = intf.get("power_draw")
+            try:
+                poe_active = float(power_draw) > 0.0
+            except (TypeError, ValueError):
+                poe_active = False
+    else:
+        poe_active = bool(poe_active)
     name       = intf.get("name") or ""
     juniper_if = intf.get("juniper_if") or ""
     port_network = intf.get("port_network")
@@ -229,6 +245,8 @@ def evaluate_rule(when: Dict[str, Any], intf: Dict[str, Any]) -> bool:
             if native_vlan != int(v): return False
         elif k == "allowed_vlans":
             if allowed_vlans_set != set(_normalize_vlan_list(v)): return False
+        elif k == "poe_active":
+            if bool(poe_active) != bool(v): return False
         elif k == "has_voice":
             if bool(voice_vlan) != bool(v): return False
         elif k == "description_regex":
