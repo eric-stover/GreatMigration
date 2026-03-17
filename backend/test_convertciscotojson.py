@@ -1,6 +1,6 @@
 from ciscoconfparse import CiscoConfParse
 
-from convertciscotojson import infer_member_models, parse_show_power_inline
+from convertciscotojson import cisco_to_juniper_if_direct, infer_member_models, parse_show_power_inline
 
 
 def test_parse_show_power_inline_extracts_power_draw():
@@ -29,7 +29,7 @@ def test_infer_member_models_treats_gi_1_0_28_as_24mp():
 
     models = infer_member_models(conf, uplink_module=1)
 
-    assert models[1] == "observed-max-port:28"
+    assert models[1] == "ex4100-24mp"
 
 
 def test_infer_member_models_classifies_high_access_ports_as_48mp():
@@ -44,4 +44,22 @@ def test_infer_member_models_classifies_high_access_ports_as_48mp():
 
     models = infer_member_models(conf, uplink_module=1)
 
-    assert models[1] == "observed-max-port:52"
+    assert models[1] == "ex4100-48mp"
+
+
+def test_cisco_to_juniper_if_direct_uses_mge_for_ex4100_48mp_low_ports():
+    out = cisco_to_juniper_if_direct(
+        "GigabitEthernet1/0/1",
+        member_models={1: "ex4100-48mp"},
+        derived_vc_members=1,
+    )
+    assert out == "mge-0/0/0"
+
+
+def test_cisco_to_juniper_if_direct_uses_ge_for_ex4100_48mp_high_ports():
+    out = cisco_to_juniper_if_direct(
+        "GigabitEthernet1/0/17",
+        member_models={1: "ex4100-48mp"},
+        derived_vc_members=1,
+    )
+    assert out == "ge-0/0/16"

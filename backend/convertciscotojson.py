@@ -133,6 +133,24 @@ def parse_show_power_inline(raw_text: str) -> Dict[str, float]:
 # ----------------------------
 # Model layout helpers
 # ----------------------------
+def _dest_ports_per_member(model: str) -> int:
+    mk = str(model or "").lower()
+    if "48" in mk:
+        return 48
+    if "24" in mk:
+        return 24
+    return 48
+
+
+def _dest_prefix_for_model(model: str, local_port_idx: int) -> str:
+    mk = str(model or "").lower()
+    if "48mp" in mk:
+        return "mge" if 0 <= local_port_idx <= 15 else "ge"
+    if "24mp" in mk:
+        return "mge" if 0 <= local_port_idx <= 7 else "ge"
+    return "ge"
+
+
 def _looks_like_uplink_by_module(nums: List[int], uplink_module: int) -> bool:
     """Uplink if we have member/module/port AND module == uplink_module."""
     return len(nums) >= 3 and nums[1] == uplink_module
@@ -182,12 +200,17 @@ def cisco_to_juniper_if_direct(
     fpc = src_member_1b - 1
     local_idx = max(nums[-1] - 1, 0) + int(port_offset or 0)
 
-    if strict_overflow and local_idx < 0:
-        raise ValueError(f"[OVERFLOW] {name} -> invalid local_idx {local_idx}")
+    model = member_models.get(src_member_1b, "ex4100-48mp")
+    dest_ppm = _dest_ports_per_member(model)
 
-    # Model-agnostic provisional mapping. Final destination interface selection
-    # is resolved dynamically from Mist if_stat during push/preview.
-    return f"ge-{fpc}/0/{local_idx}"
+    if strict_overflow and local_idx >= dest_ppm:
+        raise ValueError(
+            f"[OVERFLOW] {name} -> local_idx {local_idx}, but {model} has only {dest_ppm} access ports"
+        )
+
+    local_idx = local_idx % dest_ppm
+    prefix = _dest_prefix_for_model(model, local_idx)
+    return f"{prefix}-{fpc}/0/{local_idx}"
 
 # ----------------------------
 # Inference: per-member model + VC size
@@ -216,10 +239,11 @@ def infer_member_models(conf: CiscoConfParse, uplink_module: int) -> Dict[int, s
 
     member_models: Dict[int, str] = {}
     for member, max_port in per_member_max.items():
-        member_models[member] = f"observed-max-port:{max_port}"
+        # 24-port Catalyst often exposes 25-28 as uplink/SFP ports.
+        member_models[member] = "ex4100-24mp" if max_port <= 28 else "ex4100-48mp"
 
     if not member_models:
-        member_models[1] = "observed-max-port:unknown"
+        member_models[1] = "ex4100-48mp"
 
     return member_models
 
