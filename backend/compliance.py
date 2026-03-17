@@ -354,6 +354,20 @@ def _sync_switch_auto_upgrade_custom_versions(doc: Mapping[str, Any]) -> None:
 
     switch_payload = current_payload.get("switch") if isinstance(current_payload, Mapping) else {}
     auto_upgrade = switch_payload.get("auto_upgrade") if isinstance(switch_payload, Mapping) else {}
+    existing_custom_versions: Dict[str, str] = {}
+    if isinstance(auto_upgrade, Mapping):
+        raw_custom_versions = auto_upgrade.get("custom_versions")
+        if isinstance(raw_custom_versions, Mapping):
+            existing_custom_versions = {
+                str(model).strip(): str(version).strip()
+                for model, version in raw_custom_versions.items()
+                if str(model).strip() and str(version).strip()
+            }
+
+    if existing_custom_versions == custom_versions:
+        logger.info("action=switch_auto_upgrade_sync status=skipped reason=unchanged")
+        return
+
     if isinstance(auto_upgrade, Mapping):
         updated_auto_upgrade = dict(auto_upgrade)
     else:
