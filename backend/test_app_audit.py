@@ -768,6 +768,110 @@ def test_derive_port_config_uses_model_hint_when_device_model_unknown(monkeypatc
     assert "mge-0/0/9" not in derived
     assert derived["ge-0/0/9"]["usage"] == "end_user"
 
+
+def test_extract_physical_port_ids_from_if_stat_filters_non_physical(app_module):
+    if_stat = {
+        "irb.150": {"port_id": "irb", "up": True},
+        "lo0.0": {"port_id": "lo0", "up": True},
+        "ge-0/0/23.0": {"port_id": "ge-0/0/23", "up": False},
+        "xe-0/2/0.0": {"port_id": "xe-0/2/0", "up": True},
+        "mge-0/0/6.0": {"port_id": "mge-0/0/6", "up": False},
+        "vme.0": {"port_id": "vme", "up": False},
+    }
+
+    ports = app_module._extract_physical_port_ids_from_if_stat(if_stat)
+
+    assert ports == {"ge-0/0/23", "xe-0/2/0", "mge-0/0/6"}
+
+
+def test_build_payload_for_row_filters_ports_not_present_in_if_stat(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100-24MP")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/stats/devices/device-1?type=switch"):
+            return {
+                "if_stat": {
+                    "ge-0/0/0.0": {"port_id": "ge-0/0/0", "up": True},
+                    "ge-0/0/1.0": {"port_id": "ge-0/0/1", "up": True},
+                    "lo0.0": {"port_id": "lo0", "up": True},
+                }
+            }
+        return None
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={
+            "interfaces": [
+                {"name": "ge-0/0/0", "juniper_if": "ge-0/0/0", "mode": "access", "description": "a"},
+                {"name": "ge-0/0/1", "juniper_if": "ge-0/0/1", "mode": "access", "description": "b"},
+                {"name": "ge-0/0/2", "juniper_if": "ge-0/0/2", "mode": "access", "description": "c"},
+            ]
+        },
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    payload_port_config = result["payload"]["port_config"]
+    assert set(payload_port_config.keys()) == {"ge-0/0/0", "ge-0/0/1"}
+    warnings = result["validation"].get("warnings", [])
+    assert any("not present in destination switch if_stat" in w for w in warnings)
+
+
+def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/stats/devices/device-1?type=switch"):
+            return {
+                "if_stat": {
+                    "ge-0/0/8.0": {"port_id": "ge-0/0/8", "up": True},
+                    "ge-0/0/9.0": {"port_id": "ge-0/0/9", "up": True},
+                }
+            }
+        return None
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={
+            "port_config": {
+                "mge-0/0/8": {"usage": "end_user", "description": "a"},
+                "mge-0/0/9": {"usage": "end_user", "description": "b"},
+            }
+        },
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    payload_port_config = result["payload"]["port_config"]
+    assert set(payload_port_config.keys()) == {"ge-0/0/8", "ge-0/0/9"}
+    warnings = result["validation"].get("warnings", [])
+    assert not any("not present in destination switch if_stat" in w for w in warnings)
+
 def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     device_info = {
         "port_config": {
