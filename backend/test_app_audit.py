@@ -807,8 +807,8 @@ def test_build_payload_for_row_filters_ports_not_present_in_if_stat(monkeypatch,
 
     monkeypatch.setattr(
         app_module,
-        "_get_switch_physical_ports_for_model",
-        lambda model: {"ge-0/0/0", "ge-0/0/1"},
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/0", "ge-0/0/1"}, None),
     )
 
     result = app_module._build_payload_for_row(
@@ -846,8 +846,8 @@ def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatc
 
     monkeypatch.setattr(
         app_module,
-        "_get_switch_physical_ports_for_model",
-        lambda model: {"ge-0/0/8", "ge-0/0/9"},
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/8", "ge-0/0/9"}, None),
     )
 
     result = app_module._build_payload_for_row(
@@ -878,14 +878,43 @@ def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatc
 
 
 
+
+
+def test_build_payload_for_row_warns_when_inventory_unavailable(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100-48MP")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: (None, "unable to load NetBox Juniper index"),
+    )
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={"port_config": {"ge-0/0/0": {"usage": "end_user"}}},
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    warnings = result["validation"].get("warnings", [])
+    assert any("Destination interface inventory unavailable" in w for w in warnings)
 def test_build_payload_for_row_uses_source_interface_numbering_for_dynamic_mapping(monkeypatch, app_module):
     monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
     monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
 
     monkeypatch.setattr(
         app_module,
-        "_get_switch_physical_ports_for_model",
-        lambda model: {"ge-0/0/0", "ge-0/0/23"},
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/0", "ge-0/0/23"}, None),
     )
 
     result = app_module._build_payload_for_row(
@@ -1163,7 +1192,8 @@ console-ports:
 
     monkeypatch.setattr(app_module.requests, "get", fake_get)
 
-    ports = app_module._get_switch_physical_ports_for_model("EX4100-48MP")
+    ports, err = app_module._get_switch_physical_ports_for_model_with_diagnostics("EX4100-48MP")
 
+    assert err is None
     assert ports == {"mge-0/0/0", "ge-0/0/16", "xe-0/2/0"}
     assert any(url.endswith("/device-types/Juniper/EX4100-48MP.yaml") for url in calls)

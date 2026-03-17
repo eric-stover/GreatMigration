@@ -131,6 +131,10 @@ LEGACY_PREFIX = "legacy_"
 NETBOX_JUNIPER_DEVICETYPE_INDEX_URL = (
     "https://api.github.com/repos/netbox-community/devicetype-library/contents/device-types/Juniper"
 )
+NETBOX_JUNIPER_DEVICETYPE_RAW_BASES = (
+    "https://raw.githubusercontent.com/netbox-community/devicetype-library/main/device-types/Juniper",
+    "https://raw.githubusercontent.com/netbox-community/devicetype-library/master/device-types/Juniper",
+)
 _NETBOX_DEVICE_TYPE_URL_CACHE: Dict[str, Optional[str]] = {}
 _NETBOX_MODEL_PORT_CACHE: Dict[str, Set[str]] = {}
 
@@ -2162,6 +2166,7 @@ def _build_payload_for_row(
 
     # Keep only interfaces that actually exist on the claimed destination switch.
     available_physical_ports: Optional[Set[str]] = None
+    inventory_error: Optional[str] = None
     unavailable_ports: List[str] = []
     headers = {
         "Authorization": f"Token {token}",
@@ -2169,9 +2174,10 @@ def _build_payload_for_row(
         "Accept": "application/json",
     }
     try:
-        available_physical_ports = _get_switch_physical_ports_for_model(model)
-    except Exception:
+        available_physical_ports, inventory_error = _get_switch_physical_ports_for_model_with_diagnostics(model)
+    except Exception as exc:
         available_physical_ports = None
+        inventory_error = str(exc)
 
     if available_physical_ports is not None:
         dynamic_port_map: Dict[str, str] = {}
@@ -2224,6 +2230,10 @@ def _build_payload_for_row(
                 len(unavailable_ports),
                 ", ".join(sorted(unavailable_ports)[:10]) + (" …" if len(unavailable_ports) > 10 else ""),
             )
+        )
+    elif available_physical_ports is None and inventory_error:
+        validation.setdefault("warnings", []).append(
+            f"Destination interface inventory unavailable; using provisional interface names ({inventory_error})."
         )
 
     # Timestamp descriptions
@@ -4246,12 +4256,14 @@ def _extract_physical_port_ids_from_devicetype_yaml(yaml_text: str) -> Set[str]:
 
 
 
-def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[str]]:
+def _get_switch_physical_ports_for_model_with_diagnostics(model: Optional[str]) -> Tuple[Optional[Set[str]], Optional[str]]:
     model_key = _normalize_device_model_key(model)
     if not model_key:
-        return None
+        return None, "missing device model"
     if model_key in _NETBOX_MODEL_PORT_CACHE:
-        return set(_NETBOX_MODEL_PORT_CACHE[model_key])
+        return set(_NETBOX_MODEL_PORT_CACHE[model_key]), None
+
+    attempted_urls: List[str] = []
 
     # Prefer deterministic direct model lookup first (based on Mist model field),
     # then fall back to index-discovered download URLs.
@@ -4259,14 +4271,13 @@ def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[s
     cached_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
     if cached_url:
         candidate_urls.append(cached_url)
-    direct_url = (
-        "https://raw.githubusercontent.com/netbox-community/devicetype-library/master/"
-        f"device-types/Juniper/{model_key}.yaml"
-    )
-    if direct_url not in candidate_urls:
-        candidate_urls.append(direct_url)
+    for base in NETBOX_JUNIPER_DEVICETYPE_RAW_BASES:
+        direct_url = f"{base}/{model_key}.yaml"
+        if direct_url not in candidate_urls:
+            candidate_urls.append(direct_url)
 
     for url in candidate_urls:
+        attempted_urls.append(url)
         try:
             resp = requests.get(url, timeout=60)
         except Exception:
@@ -4278,30 +4289,37 @@ def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[s
             continue
         _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = url
         _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
-        return set(ports)
+        return set(ports), None
 
     try:
         index_map = _load_netbox_juniper_model_download_urls()
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"unable to load NetBox Juniper index ({exc}) for model {model_key}"
 
     download_url = index_map.get(model_key)
     if not download_url:
-        return None
+        attempted = ", ".join(attempted_urls[:2])
+        return None, f"no NetBox device-type YAML found for model {model_key}; tried {attempted}"
 
+    attempted_urls.append(download_url)
     try:
         resp = requests.get(download_url, timeout=60)
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"failed to fetch NetBox YAML for model {model_key} ({exc})"
     if not (200 <= resp.status_code < 300):
-        return None
+        return None, f"failed to fetch NetBox YAML for model {model_key} (HTTP {resp.status_code})"
 
     ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
     if not ports:
-        return None
+        return None, f"NetBox YAML for model {model_key} did not contain physical interfaces"
     _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = download_url
     _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
-    return set(ports)
+    return set(ports), None
+
+
+def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[str]]:
+    ports, _ = _get_switch_physical_ports_for_model_with_diagnostics(model)
+    return ports
 
 
 def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
@@ -4483,7 +4501,7 @@ def _derive_port_config_from_config_cmd(
 
     physical_ports: Optional[Set[str]] = None
     try:
-        physical_ports = _get_switch_physical_ports_for_model(device_model)
+        physical_ports, _ = _get_switch_physical_ports_for_model_with_diagnostics(device_model)
     except Exception:
         physical_ports = None
 
