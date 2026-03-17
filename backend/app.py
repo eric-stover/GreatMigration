@@ -16,6 +16,8 @@ from time import perf_counter
 import copy
 
 import requests
+
+from http_logging import install_http_logging
 from fastapi import FastAPI, UploadFile, File, Form, Request, Body, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +58,8 @@ from compliance import SiteAuditRunner, SiteContext, build_default_runner
 from audit_fixes import execute_audit_action
 from audit_actions import AP_RENAME_ACTION_ID
 from audit_history import load_site_history
+install_http_logging()
+
 
 def _expand_vlan_id_set(raw: Any, *, base: Optional[Iterable[int]] = None) -> Set[int]:
     vlan_ids: Set[int] = set(base or [])

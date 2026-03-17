@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 
 import requests
 
+from http_logging import install_http_logging
+
 from audit_actions import (
     AP_RENAME_ACTION_ID,
     CLEAR_DNS_OVERRIDE_ACTION_ID,
@@ -27,6 +29,8 @@ from compliance import (
     ENV_SWITCH_NAME_PATTERN,
     load_site_variable_config,
 )
+
+install_http_logging()
 
 AP_NAME_PATTERN = re.compile(DEFAULT_AP_NAME_PATTERN)
 if ENV_SWITCH_NAME_PATTERN is not None:

@@ -30,11 +30,15 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from http_logging import install_http_logging
+
 try:
     from zoneinfo import ZoneInfo  # py3.9+
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
+
+install_http_logging()
 
 class PortConfigError(Exception):
     """Raised when building or validating Mist port configuration."""
