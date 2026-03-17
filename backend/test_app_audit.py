@@ -322,6 +322,93 @@ def test_apply_temp_config_payload_strips_port_assignments(monkeypatch, app_modu
     assert "port_overrides" not in preview_payload
 
 
+
+
+def test_finalize_assignments_preview_preserves_site_and_device_payloads(monkeypatch, app_module):
+    monkeypatch.setattr(
+        app_module,
+        "_prepare_switch_port_profile_payload",
+        lambda *args, **kwargs: (kwargs.get("payload") if "payload" in kwargs else args[3], [], {}),
+    )
+
+    row = {
+        "ok": True,
+        "site_id": "site-1",
+        "device_id": "device-1",
+        "_temp_config_source": {
+            "vlans": [{"id": 10, "name": "Data"}],
+            "interfaces": [
+                {
+                    "mode": "access",
+                    "data_vlan": 10,
+                    "juniper_if": "ge-0/0/1",
+                    "name": "Gig1",
+                }
+            ],
+        },
+    }
+
+    result = app_module._finalize_assignments_for_rows(
+        "https://example.com/api/v1",
+        "token",
+        [row],
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert result["total"] == 1
+    payloads = result.get("payloads") or []
+    assert len(payloads) == 1
+    record = payloads[0]
+    assert record.get("site_id") == "site-1"
+    assert record.get("device_payloads", {}).get("device-1", {}).get("port_config", {}).get("ge-0/0/1")
+
+
+def test_finalize_assignments_live_pushes_site_and_device(monkeypatch, app_module):
+    calls: list[Dict[str, Any]] = []
+
+    def fake_site_override(base_url: str, token: str, site_id: str, payload: Dict[str, Any]):
+        calls.append({"kind": "site", "site_id": site_id, "payload": payload})
+        return {"ok": True, "status": 200, "response": {"ok": True}}
+
+    def fake_put_device(base_url: str, token: str, site_id: str, device_id: str, payload: Dict[str, Any]):
+        calls.append({"kind": "device", "site_id": site_id, "device_id": device_id, "payload": payload})
+        return {"status": 200, "response": {"ok": True}}
+
+    monkeypatch.setattr(app_module, "_configure_switch_port_profile_override", fake_site_override)
+    monkeypatch.setattr(app_module, "_put_device_payload", fake_put_device)
+
+    row = {
+        "ok": True,
+        "site_id": "site-1",
+        "device_id": "device-1",
+        "_temp_config_source": {
+            "vlans": [{"id": 10, "name": "Data"}],
+            "interfaces": [
+                {
+                    "mode": "access",
+                    "data_vlan": 10,
+                    "juniper_if": "ge-0/0/1",
+                    "name": "Gig1",
+                }
+            ],
+        },
+    }
+
+    result = app_module._finalize_assignments_for_rows(
+        "https://example.com/api/v1",
+        "token",
+        [row],
+        dry_run=False,
+    )
+
+    assert result["ok"] is True
+    assert result["successes"] == 1
+    assert result["failures"] == []
+    assert [c["kind"] for c in calls] == ["site", "device"]
+    assert calls[1]["payload"].get("port_config", {}).get("ge-0/0/1")
+
 def test_remove_temp_config_returns_preview_when_dry_run(monkeypatch, app_module):
     def fake_get(url: str, headers=None, timeout: int = 60):
         class Resp:
@@ -345,7 +432,7 @@ def test_remove_temp_config_returns_preview_when_dry_run(monkeypatch, app_module
 
     monkeypatch.setattr(
         app_module,
-        "_derive_port_config_from_config_cmd",
+        "_derive_port_config_from_port_profiles",
         lambda *args, **kwargs: {"ge-0/0/1": {"usage": "derived_user"}},
     )
 
@@ -401,6 +488,11 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
 
     monkeypatch.setattr(app_module.requests, "put", fake_put)
     monkeypatch.setattr(app_module.requests, "get", fake_get)
+    monkeypatch.setattr(
+        app_module,
+        "_derive_port_config_from_port_profiles",
+        lambda *args, **kwargs: {"ge-0/0/5": {"usage": "access"}},
+    )
 
     final_payload = {"port_config": {"ge-0/0/5": {"usage": "access"}}}
     row = {
@@ -420,17 +512,16 @@ def test_remove_temp_config_wipes_and_pushes(monkeypatch, app_module):
     assert result["ok"] is True
     assert result["successes"] == 1
     assert result["failures"] == []
-    assert len(calls) == 4
-    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/devices/device-1/config_cmd"
+    assert len(calls) == 3
+    assert calls[0]["url"] == "https://example.com/api/v1/sites/site-1/setting"
     assert calls[1]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["url"] == "https://example.com/api/v1/sites/site-1/setting"
-    assert calls[2]["json"] == {
+    assert calls[1]["json"] == {
         "networks": {},
         "port_usages": {},
         "port_config": {},
         "port_overrides": [],
     }
-    assert calls[3]["json"] == final_payload
+    assert calls[2]["json"] == final_payload
 
 
 def test_remove_temp_config_preserves_legacy_vlan(monkeypatch, app_module):
@@ -531,6 +622,39 @@ def test_cleanup_payload_preserves_legacy_usage_name(app_module):
     assert cleanup["port_config"] == {"ge-0/0/20": {"usage": "legacy_AUTO_ACCESS_V10_POE_EDGE"}}
 
 
+def test_cleanup_payload_preserves_network_only_trunk_port_config(app_module):
+    settings = {
+        "networks": {
+            "legacy_net": {"vlan_id": 10, "note": "keep"},
+            "temp_net": {"vlan_id": 200, "note": "drop"},
+        },
+        "switch": {
+            "port_config": {
+                "ge-0/0/10": {
+                    "mode": "trunk",
+                    "native_network": "legacy_net",
+                    "networks": ["legacy_net"],
+                }
+            }
+        },
+    }
+
+    cleanup = app_module._build_site_cleanup_payload_for_setting(
+        settings,
+        preserve_legacy_vlans=True,
+        legacy_vlan_ids={10},
+    )
+
+    assert cleanup["networks"] == {"legacy_net": {"vlan_id": 10, "note": "keep"}}
+    assert cleanup["port_config"] == {
+        "ge-0/0/10": {
+            "mode": "trunk",
+            "native_network": "legacy_net",
+            "networks": ["legacy_net"],
+        }
+    }
+
+
 def test_cleanup_payload_preserves_all_networks_trunk(app_module):
     settings = {
         "networks": {
@@ -555,6 +679,317 @@ def test_cleanup_payload_preserves_all_networks_trunk(app_module):
     assert cleanup.get("port_usages") == {"legacy_TRUNK_ALL": {"mode": "trunk", "all_networks": True}}
 
 
+
+
+def test_resolve_interface_name_from_available_ports_supports_ge_mge(app_module):
+    available = {"ge-0/0/9", "mge-0/0/7"}
+    assert app_module._resolve_interface_name_from_available_ports("mge-0/0/9", available) == "ge-0/0/9"
+    assert app_module._resolve_interface_name_from_available_ports("ge-0/0/7", available) == "mge-0/0/7"
+    assert app_module._resolve_interface_name_from_available_ports("xe-0/2/1", available) is None
+
+
+def test_derive_port_config_keeps_port_ids_without_model_normalization(monkeypatch, app_module):
+    device_info = {
+        "model": "EX4100-24MP",
+        "port_config": {
+            "mge-0/0/9": {"usage": "AUTO_ACCESS"},
+            "mge-0/0/23": {"usage": "AUTO_ACCESS"},
+            "xe-0/2/1": {"usage": "AUTO_UPLINK"},
+        },
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+            "AUTO_UPLINK": {"mode": "trunk"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+    )
+
+    assert derived["mge-0/0/9"]["usage"] == "end_user"
+    assert derived["mge-0/0/23"]["usage"] == "end_user"
+    assert derived["xe-0/2/1"]["usage"] == "end_user"
+
+
+def test_derive_port_config_uses_model_hint_when_device_model_unknown(monkeypatch, app_module):
+    device_info = {
+        "model": "EX4100",
+        "port_config": {
+            "mge-0/0/9": {"usage": "AUTO_ACCESS"},
+        },
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        model_hint="EX4100-24MP",
+    )
+
+    assert derived["mge-0/0/9"]["usage"] == "end_user"
+
+
+
+
+def test_candidate_device_model_keys_trims_suffixes(app_module):
+    keys = app_module._candidate_device_model_keys("EX4100-48MP-VC")
+    assert keys[0] == "EX4100-48MP-VC"
+    assert "EX4100-48MP" in keys
+
+
+def test_get_switch_physical_ports_for_model_handles_model_suffixes(monkeypatch, app_module):
+    app_module._NETBOX_DEVICE_TYPE_URL_CACHE.clear()
+    app_module._NETBOX_MODEL_PORT_CACHE.clear()
+
+    class _Resp:
+        def __init__(self, status_code: int, payload=None, text: str = ""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url: str, timeout: int = 60):
+        if url.endswith("/EX4100-48MP-VC.yaml"):
+            return _Resp(404, payload={})
+        if url.endswith("/EX4100-48MP.yaml"):
+            return _Resp(
+                200,
+                text="""interfaces:
+  - name: mge-0/0/0
+  - name: ge-0/0/16
+""",
+            )
+        return _Resp(404, payload={})
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+
+    ports, err = app_module._get_switch_physical_ports_for_model_with_diagnostics("EX4100-48MP-VC")
+
+    assert err is None
+    assert ports == {"mge-0/0/0", "ge-0/0/16"}
+def test_extract_physical_port_ids_from_devicetype_yaml(app_module):
+    yaml_text = """
+manufacturer: Juniper
+model: EX4100-48MP
+interfaces:
+  - name: ge-0/0/0
+    type: 1000base-t
+  - name: ge-0/0/1
+    type: 1000base-t
+  - name: xe-0/2/0
+    type: 10gbase-x-sfpp
+console-ports:
+  - name: con0
+"""
+
+    ports = app_module._extract_physical_port_ids_from_devicetype_yaml(yaml_text)
+
+    assert ports == {"ge-0/0/0", "ge-0/0/1", "xe-0/2/0"}
+
+
+def test_extract_physical_port_ids_from_if_stat_filters_non_physical(app_module):
+    if_stat = {
+        "irb.150": {"port_id": "irb", "up": True},
+        "lo0.0": {"port_id": "lo0", "up": True},
+        "ge-0/0/23.0": {"port_id": "ge-0/0/23", "up": False},
+        "xe-0/2/0.0": {"port_id": "xe-0/2/0", "up": True},
+        "mge-0/0/6.0": {"port_id": "mge-0/0/6", "up": False},
+        "vme.0": {"port_id": "vme", "up": False},
+    }
+
+    ports = app_module._extract_physical_port_ids_from_if_stat(if_stat)
+
+    assert ports == {"ge-0/0/23", "xe-0/2/0", "mge-0/0/6"}
+
+
+def test_build_payload_for_row_filters_ports_not_present_in_if_stat(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100-24MP")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/0", "ge-0/0/1"}, None),
+    )
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={
+            "interfaces": [
+                {"name": "ge-0/0/0", "juniper_if": "ge-0/0/0", "mode": "access", "description": "a"},
+                {"name": "ge-0/0/1", "juniper_if": "ge-0/0/1", "mode": "access", "description": "b"},
+                {"name": "ge-0/0/2", "juniper_if": "ge-0/0/2", "mode": "access", "description": "c"},
+            ]
+        },
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    assert result["ok"] is True
+    payload_port_config = result["payload"]["port_config"]
+    assert set(payload_port_config.keys()) == {"ge-0/0/0", "ge-0/0/1"}
+    warnings = result["validation"].get("warnings", [])
+    assert any("not present in destination switch interface inventory" in w for w in warnings)
+
+
+def test_build_payload_for_row_keeps_ports_when_ge_mge_prefix_differs(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/8", "ge-0/0/9"}, None),
+    )
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={
+            "port_config": {
+                "mge-0/0/8": {"usage": "end_user", "description": "a"},
+                "mge-0/0/9": {"usage": "end_user", "description": "b"},
+            }
+        },
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    payload_port_config = result["payload"]["port_config"]
+    assert set(payload_port_config.keys()) == {"ge-0/0/8", "ge-0/0/9"}
+    warnings = result["validation"].get("warnings", [])
+    assert not any("not present in destination switch interface inventory" in w for w in warnings)
+
+
+
+
+
+def test_build_payload_for_row_warns_when_inventory_unavailable(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100-48MP")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: (None, "unable to load NetBox Juniper index"),
+    )
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={"port_config": {"ge-0/0/0": {"usage": "end_user"}}},
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    warnings = result["validation"].get("warnings", [])
+    assert any("Destination interface inventory unavailable" in w for w in warnings)
+def test_build_payload_for_row_uses_source_interface_numbering_for_dynamic_mapping(monkeypatch, app_module):
+    monkeypatch.setattr(app_module, "get_device_model", lambda *args, **kwargs: "EX4100")
+    monkeypatch.setattr(app_module, "timestamp_str", lambda tz: "2026-01-01 00:00")
+
+    monkeypatch.setattr(
+        app_module,
+        "_get_switch_physical_ports_for_model_with_diagnostics",
+        lambda model: ({"ge-0/0/0", "ge-0/0/23"}, None),
+    )
+
+    result = app_module._build_payload_for_row(
+        base_url="https://example.com/api/v1",
+        tz="UTC",
+        token="token",
+        site_id="site-1",
+        device_id="device-1",
+        payload_in={
+            "interfaces": [
+                {
+                    "name": "GigabitEthernet1/0/1",
+                    "juniper_if": "ge-0/0/10",
+                    "mode": "access",
+                    "description": "first",
+                },
+                {
+                    "name": "GigabitEthernet1/0/24",
+                    "juniper_if": "ge-0/0/11",
+                    "mode": "access",
+                    "description": "last",
+                },
+            ]
+        },
+        model_override=None,
+        excludes=None,
+        exclude_uplinks=False,
+        member_offset=0,
+        port_offset=0,
+        normalize_modules=False,
+        dry_run=True,
+    )
+
+    payload_port_config = result["payload"]["port_config"]
+    assert set(payload_port_config.keys()) == {"ge-0/0/0", "ge-0/0/23"}
 def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     device_info = {
         "port_config": {
@@ -590,6 +1025,146 @@ def test_derive_port_config_preserves_usage_names(monkeypatch, app_module):
     assert derived["ge-0/0/20"]["usage"] == "legacy_AUTO_ACCESS_V10_POE_EDGE"
     assert derived["ge-0/0/21"]["usage"] == "end_user"
 
+
+
+
+
+def test_derive_port_config_does_not_preserve_trunk_usage_names(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "ge-0/0/20": {"usage": "legacy_AUTO_TRUNK_N4_POE"},
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "legacy_AUTO_TRUNK_N4_POE": {
+                "mode": "trunk",
+                "native_network": "corp",
+                "networks": ["corp"],
+            },
+        },
+        "networks": {"corp": {"vlan_id": 4}},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"name": "to-ap", "when": {"mode": "trunk"}, "set": {"usage": "ap"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        preserve_usage_names={"legacy_AUTO_TRUNK_N4_POE"},
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["ge-0/0/20"]["usage"] == "ap"
+    decision = derived["decisions"][0]
+    assert decision["preserved"] is False
+    assert decision["matched_rule"] == "to-ap"
+
+def test_derive_port_config_trunk_port_network_falls_back_to_native_vlan(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "mge-0/0/15": {
+                "usage": "legacy_AUTO_TRUNK_N3_POE",
+                "description": "Access point -NASPRLWAP03",
+            },
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "legacy_AUTO_TRUNK_N3_POE": {
+                "mode": "trunk",
+                "port_network": "legacy_data",
+            },
+        },
+        "networks": {"legacy_data": {"vlan_id": 3}},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {
+            "rules": [
+                {"name": "ap-native-3", "when": {"mode": "trunk", "native_vlan": 3}, "set": {"usage": "ap"}},
+                {"name": "catch-all-blackhole", "when": {"any": True}, "set": {"usage": "blackhole"}},
+            ]
+        },
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["mge-0/0/15"]["usage"] == "ap"
+    decision = derived["decisions"][0]
+    assert decision["matched_rule"] == "ap-native-3"
+    assert decision["interface"]["native_vlan"] == 3
+
+
+def test_derive_port_config_returns_decisions_when_requested(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "ge-0/0/1": {"usage": "legacy_keep"},
+            "ge-0/0/2": {"usage": "AUTO_ACCESS"},
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "AUTO_ACCESS": {"mode": "access"},
+        },
+        "networks": {},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {"rules": [{"name": "default-user", "when": {"any": True}, "set": {"usage": "end_user"}}]},
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        preserve_usage_names={"legacy_keep"},
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["ge-0/0/1"]["usage"] == "legacy_keep"
+    assert derived["port_config"]["ge-0/0/2"]["usage"] == "end_user"
+    decisions = derived.get("decisions")
+    assert isinstance(decisions, list)
+    assert len(decisions) == 2
+    assert any(d.get("preserved") is True and d.get("port_id") == "ge-0/0/1" for d in decisions)
+    assert any(d.get("matched_rule") == "default-user" and d.get("port_id") == "ge-0/0/2" for d in decisions)
+
 def test_load_site_history_parses_breakdown(tmp_path):
     from audit_history import load_site_history
 
@@ -621,3 +1196,44 @@ def test_load_site_history_parses_breakdown(tmp_path):
     assert west_dict["runs"][0]["devices"] == 30
     assert history["Wahpeton"].issues_total == 1
     assert history["Unknown"].run_count == 0
+
+
+def test_get_switch_physical_ports_for_model_uses_direct_model_yaml_lookup(monkeypatch, app_module):
+    app_module._NETBOX_DEVICE_TYPE_URL_CACHE.clear()
+    app_module._NETBOX_MODEL_PORT_CACHE.clear()
+
+    class _Resp:
+        def __init__(self, status_code: int, payload=None, text: str = ""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+
+        def json(self):
+            return self._payload
+
+    calls: list[str] = []
+
+    def fake_get(url: str, timeout: int = 60):
+        calls.append(url)
+        if url.endswith("/device-types/Juniper/EX4100-48MP.yaml"):
+            return _Resp(
+                200,
+                text="""interfaces:
+  - name: mge-0/0/0
+  - name: ge-0/0/16
+  - name: xe-0/2/0
+console-ports:
+  - name: con0
+""",
+            )
+        if url == app_module.NETBOX_JUNIPER_DEVICETYPE_INDEX_URL:
+            return _Resp(500, payload={})
+        return _Resp(404, payload={})
+
+    monkeypatch.setattr(app_module.requests, "get", fake_get)
+
+    ports, err = app_module._get_switch_physical_ports_for_model_with_diagnostics("EX4100-48MP")
+
+    assert err is None
+    assert ports == {"mge-0/0/0", "ge-0/0/16", "xe-0/2/0"}
+    assert any(url.endswith("/device-types/Juniper/EX4100-48MP.yaml") for url in calls)

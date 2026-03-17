@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from ciscoconfparse import CiscoConfParse
 
-TARGET_MODELS = {"ex4100-48mp", "ex4100-24mp"}
 
 # ----------------------------
 # Parsing & classification (number-driven)
@@ -100,23 +99,58 @@ def to_int(x) -> Optional[int]:
     except Exception:
         return None
 
+
+def _normalize_cisco_ifname(name: str) -> str:
+    short = re.sub(r"\s+", "", (name or "")).lower()
+    short = re.sub(r"^gigabitethernet", "gi", short)
+    short = re.sub(r"^tengigabitethernet", "te", short)
+    short = re.sub(r"^ten", "te", short)
+    return short
+
+
+def parse_show_power_inline(raw_text: str) -> Dict[str, float]:
+    """Return Cisco interface -> power draw watts parsed from 'show power inline' output."""
+    results: Dict[str, float] = {}
+    if not raw_text:
+        return results
+
+    line_re = re.compile(
+        r"^(?P<intf>(?:Gi|GigabitEthernet|Te|TenGigabitEthernet|Ten)\S+)\s+\S+\s+\S+\s+(?P<watts>[0-9]+(?:\.[0-9]+)?)\b",
+        flags=re.IGNORECASE,
+    )
+    for line in raw_text.splitlines():
+        match = line_re.match(line.strip())
+        if not match:
+            continue
+        try:
+            watts = float(match.group("watts"))
+        except ValueError:
+            continue
+        results[_normalize_cisco_ifname(match.group("intf"))] = watts
+
+    return results
+
 # ----------------------------
 # Model layout helpers
 # ----------------------------
 def _dest_ports_per_member(model: str) -> int:
-    return 48 if model.lower() == "ex4100-48mp" else 24
+    mk = str(model or "").lower()
+    if "48" in mk:
+        return 48
+    if "24" in mk:
+        return 24
+    return 48
+
 
 def _dest_prefix_for_model(model: str, local_port_idx: int) -> str:
-    m = model.lower()
-    if m == "ex4100-48mp":
+    mk = str(model or "").lower()
+    if "48mp" in mk:
         return "mge" if 0 <= local_port_idx <= 15 else "ge"
-    elif m == "ex4100-24mp":
+    if "24mp" in mk:
         return "mge" if 0 <= local_port_idx <= 7 else "ge"
     return "ge"
 
-# ----------------------------
-# Mapping (module-driven logic)
-# ----------------------------
+
 def _looks_like_uplink_by_module(nums: List[int], uplink_module: int) -> bool:
     """Uplink if we have member/module/port AND module == uplink_module."""
     return len(nums) >= 3 and nums[1] == uplink_module
@@ -166,16 +200,25 @@ def cisco_to_juniper_if_direct(
     fpc = src_member_1b - 1
     local_idx = max(nums[-1] - 1, 0) + int(port_offset or 0)
 
-    model = member_models.get(src_member_1b, "ex4100-48mp")  # safe default
+    model = member_models.get(src_member_1b, "ex4100-48mp")
+    model_l = str(model or "").lower()
+
+    # Some 24/48-port Cisco models expose SFP uplinks in the same module as
+    # access ports (e.g. Gi1/0/25-28 or Gi1/0/49-52). Map these to xe uplinks
+    # instead of wrapping back onto access ports.
+    if "24" in model_l and 24 <= local_idx <= 27:
+        return f"xe-{fpc}/2/{local_idx - 24}"
+    if "48" in model_l and 48 <= local_idx <= 51:
+        return f"xe-{fpc}/2/{local_idx - 48}"
+
     dest_ppm = _dest_ports_per_member(model)
 
     if strict_overflow and local_idx >= dest_ppm:
         raise ValueError(
             f"[OVERFLOW] {name} -> local_idx {local_idx}, but {model} has only {dest_ppm} access ports"
         )
-    # Keep readable even if strict is off
-    local_idx = local_idx % dest_ppm
 
+    local_idx = local_idx % dest_ppm
     prefix = _dest_prefix_for_model(model, local_idx)
     return f"{prefix}-{fpc}/0/{local_idx}"
 
@@ -206,12 +249,10 @@ def infer_member_models(conf: CiscoConfParse, uplink_module: int) -> Dict[int, s
 
     member_models: Dict[int, str] = {}
     for member, max_port in per_member_max.items():
-        member_models[member] = "ex4100-24mp" if max_port <= 24 else "ex4100-48mp"
+        # 24-port Catalyst often exposes 25-28 as uplink/SFP ports.
+        member_models[member] = "ex4100-24mp" if max_port <= 28 else "ex4100-48mp"
 
-    # If a member had no access ports (only uplinks), assume 48MP for safety.
-    # This keeps mapping valid even for uplink-only configs.
     if not member_models:
-        # No data at all? default member 1 → 48MP
         member_models[1] = "ex4100-48mp"
 
     return member_models
@@ -238,8 +279,11 @@ def convert_one_file(
     base_name = os.path.splitext(os.path.basename(str(input_path)))[0]
     output_file = out_dir / f"{base_name}_converted.json"
 
+    raw_text = input_path.read_text(encoding="utf-8", errors="ignore")
+
     # Parse config
     conf = CiscoConfParse(str(input_path), factory=True)
+    poe_watts_map = parse_show_power_inline(raw_text)
 
     # Infer VC size from source (max member number) and per-member models
     member_numbers = []
@@ -256,10 +300,8 @@ def convert_one_file(
     if derived_vc_members < 1:
         derived_vc_members = 1
 
-    if force_model and force_model.lower() not in TARGET_MODELS:
-        raise ValueError(f"--force-model must be one of {sorted(TARGET_MODELS)}")
     if force_model:
-        member_models = {m: force_model.lower() for m in range(1, derived_vc_members + 1)}
+        member_models = {m: str(force_model).lower() for m in range(1, derived_vc_members + 1)}
     else:
         member_models = infer_member_models(conf, uplink_module=uplink_module)
 
@@ -351,6 +393,12 @@ def convert_one_file(
             "src_port": src_port,
             "children": children,
         }
+
+        watts = poe_watts_map.get(_normalize_cisco_ifname(ifname))
+        if watts is not None:
+            iface["poe_watts"] = watts
+            iface["poe_active"] = watts > 0.0
+
         if mapping_overflow:
             iface["mapping_overflow"] = True
         interfaces.append(iface)

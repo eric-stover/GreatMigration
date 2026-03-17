@@ -1,6 +1,11 @@
 import pytest
 
-from push_mist_port_config import evaluate_rule, validate_rules_doc
+from push_mist_port_config import (
+    cisco_to_ex_if_enhanced,
+    evaluate_rule,
+    index_to_ex4100_if,
+    validate_rules_doc,
+)
 
 
 def test_evaluate_rule_matches_allowed_vlans_list():
@@ -38,6 +43,27 @@ def test_validate_rules_doc_accepts_allowed_vlans_condition():
     validate_rules_doc(doc)
 
 
+def test_validate_rules_doc_accepts_poe_active_condition():
+    doc = {
+        "rules": [
+            {
+                "name": "ap-trunk-poe",
+                "when": {"mode": "trunk", "poe_active": True},
+                "set": {"usage": "ap"},
+            }
+        ]
+    }
+
+    validate_rules_doc(doc)
+
+
+def test_evaluate_rule_matches_poe_active_from_power_draw():
+    intf = {"mode": "trunk", "power_draw": 6.5}
+
+    assert evaluate_rule({"mode": "trunk", "poe_active": True}, intf) is True
+    assert evaluate_rule({"mode": "trunk", "poe_active": False}, intf) is False
+
+
 def test_evaluate_rule_treats_access_without_data_vlan_as_vlan_1():
     intf = {
         "mode": "access",
@@ -62,3 +88,28 @@ def test_validate_rules_doc_rejects_invalid_allowed_vlans(value):
 
     with pytest.raises(ValueError):
         validate_rules_doc(doc)
+
+
+def test_validate_rules_doc_rejects_invalid_poe_active_type():
+    doc = {
+        "rules": [
+            {
+                "name": "bad-poe",
+                "when": {"poe_active": "yes"},
+                "set": {"usage": "ap"},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError):
+        validate_rules_doc(doc)
+
+
+def test_index_to_ex4100_if_supports_model_variants():
+    assert index_to_ex4100_if("EX4100-24MP-VC", 10) == "ge-0/0/9"
+    assert index_to_ex4100_if("EX4100-48MP Premium", 10) == "mge-0/0/9"
+
+
+def test_cisco_to_ex_if_enhanced_supports_model_variants():
+    assert cisco_to_ex_if_enhanced("EX4100-24MP Virtual Chassis", "GigabitEthernet1/0/10") == "ge-0/0/9"
+    assert cisco_to_ex_if_enhanced("EX4100-48MP Virtual Chassis", "GigabitEthernet1/0/10") == "mge-0/0/9"

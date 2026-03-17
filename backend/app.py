@@ -132,6 +132,16 @@ RESERVED_VLAN_IDS: Set[int] = set(RESERVED_VLAN_NAME_MAP.keys())
 LEGACY_VLAN_LABEL = _format_vlan_id_set(LEGACY_VLAN_IDS) or _format_vlan_id_set(DEFAULT_LEGACY_VLAN_IDS)
 LEGACY_PREFIX = "legacy_"
 
+NETBOX_JUNIPER_DEVICETYPE_INDEX_URL = (
+    "https://api.github.com/repos/netbox-community/devicetype-library/contents/device-types/Juniper"
+)
+NETBOX_JUNIPER_DEVICETYPE_RAW_BASES = (
+    "https://raw.githubusercontent.com/netbox-community/devicetype-library/main/device-types/Juniper",
+    "https://raw.githubusercontent.com/netbox-community/devicetype-library/master/device-types/Juniper",
+)
+_NETBOX_DEVICE_TYPE_URL_CACHE: Dict[str, Optional[str]] = {}
+_NETBOX_MODEL_PORT_CACHE: Dict[str, Set[str]] = {}
+
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 PAGE_COPY: dict[str, dict[str, str]] = {
@@ -360,7 +370,9 @@ if static_path.exists():
 README_URL = "https://github.com/jacob-hopkins/GreatMigration#readme"
 # Where to send users when they click the help icon
 HELP_URL = os.getenv("HELP_URL", README_URL)
-RULES_PATH = Path(__file__).resolve().parent / "port_rules.json"
+RULES_REPO_PATH = Path(__file__).resolve().parent / "port_rules.json"
+RULES_LOCAL_PATH = Path(__file__).resolve().parent / "port_rules.local.json"
+RULES_SAMPLE_PATH = Path(__file__).resolve().parent / "port_rules.sample.json"
 REPLACEMENTS_PATH = Path(__file__).resolve().parent / "replacement_rules.json"
 NETBOX_DT_URL = os.getenv(
     "NETBOX_DT_URL",
@@ -1107,7 +1119,10 @@ def _gather_site_contexts(
 def api_get_rules():
     """Return current rule document."""
     try:
-        data = json.loads(RULES_PATH.read_text(encoding="utf-8"))
+        rules_path = RULES_LOCAL_PATH if RULES_LOCAL_PATH.exists() else RULES_REPO_PATH
+        if not rules_path.exists():
+            rules_path = RULES_SAMPLE_PATH
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
         return {"ok": True, "doc": data}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -1120,7 +1135,7 @@ def api_save_rules(request: Request, doc: Dict[str, Any] = Body(...)):
         # Ensure the request is from an authenticated user
         current_user(request)
         pm.validate_rules_doc(doc)
-        RULES_PATH.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        RULES_LOCAL_PATH.write_text(json.dumps(doc, indent=2), encoding="utf-8")
         pm.RULES_DOC = pm.load_rules()
         return {"ok": True}
     except ValueError as e:
@@ -2153,8 +2168,77 @@ def _build_payload_for_row(
             ]
             temp_source["interfaces"] = filtered_interfaces
 
+    # Keep only interfaces that actually exist on the claimed destination switch.
+    available_physical_ports: Optional[Set[str]] = None
+    inventory_error: Optional[str] = None
+    unavailable_ports: List[str] = []
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    try:
+        available_physical_ports, inventory_error = _get_switch_physical_ports_for_model_with_diagnostics(model)
+    except Exception as exc:
+        available_physical_ports = None
+        inventory_error = str(exc)
+
+    if available_physical_ports is not None:
+        dynamic_port_map: Dict[str, str] = {}
+        if isinstance(temp_source, dict) and isinstance(temp_source.get("interfaces"), list):
+            dynamic_port_map = _build_dynamic_destination_port_map(
+                temp_source.get("interfaces", []),
+                available_physical_ports,
+            )
+
+        filtered_port_config: Dict[str, Dict[str, Any]] = {}
+        for ifname, cfg in port_config.items():
+            if not pm.MIST_IF_RE.match(ifname):
+                filtered_port_config[ifname] = cfg
+                continue
+
+            resolved_ifname = dynamic_port_map.get(ifname)
+            if not resolved_ifname:
+                resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports)
+            if not resolved_ifname:
+                unavailable_ports.append(ifname)
+                continue
+            filtered_port_config[resolved_ifname] = cfg
+        port_config = filtered_port_config
+
+        if isinstance(temp_source, dict) and isinstance(temp_source.get("interfaces"), list):
+            filtered_interfaces = []
+            for intf in temp_source.get("interfaces", []):
+                if not isinstance(intf, Mapping):
+                    continue
+                ifname = str(intf.get("juniper_if") or "").strip()
+                if not pm.MIST_IF_RE.match(ifname):
+                    filtered_interfaces.append(intf)
+                    continue
+                resolved_ifname = dynamic_port_map.get(ifname)
+                if not resolved_ifname:
+                    resolved_ifname = _resolve_interface_name_from_available_ports(ifname, available_physical_ports)
+                if not resolved_ifname:
+                    continue
+                updated = dict(intf)
+                updated["juniper_if"] = resolved_ifname
+                filtered_interfaces.append(updated)
+            temp_source["interfaces"] = filtered_interfaces
+
     # Capacity validation (block live push; warn on dry-run)
     validation = validate_port_config_against_model(port_config, model)
+    if unavailable_ports:
+        validation.setdefault("warnings", []).append(
+            "Skipped %d mapped interface(s) not present in destination switch interface inventory: %s"
+            % (
+                len(unavailable_ports),
+                ", ".join(sorted(unavailable_ports)[:10]) + (" …" if len(unavailable_ports) > 10 else ""),
+            )
+        )
+    elif available_physical_ports is None and inventory_error:
+        validation.setdefault("warnings", []).append(
+            f"Destination interface inventory unavailable; using provisional interface names ({inventory_error})."
+        )
 
     # Timestamp descriptions
     ts = timestamp_str(tz)
@@ -3837,11 +3921,11 @@ def _build_site_cleanup_payload_for_setting(
                 keep = True
             if profile_value and profile_value in preserved_profile_names:
                 keep = True
-            if not keep and _port_usage_references_networks(cfg, preserved_network_names):
-                keep = True
             if not keep and _port_profile_targets_legacy(cfg, legacy_vlan_ids):
                 keep = True
             if not keep and _usage_name_targets_legacy(usage_value, legacy_vlan_ids):
+                keep = True
+            if not keep and _port_usage_references_networks(cfg, preserved_network_names):
                 keep = True
             if keep:
                 preserved_port_config[port_key] = _compact_dict(dict(cfg))
@@ -4118,6 +4202,313 @@ def _parse_config_cmd_interfaces(cli_lines: Sequence[str]) -> List[Dict[str, Any
     return interfaces
 
 
+
+def _normalize_device_model_key(model: Optional[str]) -> str:
+    text = str(model or "").strip().upper()
+    text = re.sub(r"[^A-Z0-9-]", "", text)
+    return text
+
+
+def _candidate_device_model_keys(model_key: str) -> List[str]:
+    """Return progressively generalized model keys for library lookup."""
+    key = _normalize_device_model_key(model_key)
+    if not key:
+        return []
+    keys: List[str] = [key]
+    parts = key.split("-")
+    while len(parts) > 2:
+        parts = parts[:-1]
+        candidate = "-".join(parts)
+        if candidate and candidate not in keys:
+            keys.append(candidate)
+    return keys
+
+
+def _load_netbox_juniper_model_download_urls() -> Dict[str, str]:
+    resp = requests.get(NETBOX_JUNIPER_DEVICETYPE_INDEX_URL, timeout=60)
+    if not (200 <= resp.status_code < 300):
+        raise RuntimeError(f"Failed to load Juniper device type index (HTTP {resp.status_code})")
+    payload = resp.json()
+    if not isinstance(payload, list):
+        return {}
+
+    mapping: Dict[str, str] = {}
+    for item in payload:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        download_url = str(item.get("download_url") or "").strip()
+        if not name.lower().endswith(".yaml") or not download_url:
+            continue
+        model_name = name.rsplit(".", 1)[0]
+        key = _normalize_device_model_key(model_name)
+        if key:
+            mapping[key] = download_url
+    return mapping
+
+
+def _extract_physical_port_ids_from_devicetype_yaml(yaml_text: str) -> Set[str]:
+    ports: Set[str] = set()
+    in_interfaces = False
+    for raw_line in str(yaml_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        if not in_interfaces:
+            if stripped == "interfaces:":
+                in_interfaces = True
+            continue
+
+        # stop when next top-level section begins
+        if not raw_line.startswith(" ") and stripped.endswith(":"):
+            break
+
+        name_match = re.search(r"(?:^-\s*)?name:\s*['\"]?([^'\"#]+)", stripped)
+        if not name_match:
+            continue
+        ifname = name_match.group(1).strip()
+        if pm.MIST_IF_RE.match(ifname):
+            ports.add(ifname)
+
+    return ports
+
+
+
+def _get_switch_physical_ports_for_model_with_diagnostics(model: Optional[str]) -> Tuple[Optional[Set[str]], Optional[str]]:
+    model_key = _normalize_device_model_key(model)
+    if not model_key:
+        return None, "missing device model"
+    if model_key in _NETBOX_MODEL_PORT_CACHE:
+        return set(_NETBOX_MODEL_PORT_CACHE[model_key]), None
+
+    model_keys = _candidate_device_model_keys(model_key)
+    if not model_keys:
+        return None, f"invalid device model key: {model}"
+
+    attempted_urls: List[str] = []
+
+    # Prefer deterministic direct model lookup first (based on Mist model field),
+    # then fall back to index-discovered download URLs.
+    candidate_urls: List[str] = []
+    cached_url = _NETBOX_DEVICE_TYPE_URL_CACHE.get(model_key)
+    if cached_url:
+        candidate_urls.append(cached_url)
+    for mk in model_keys:
+        for base in NETBOX_JUNIPER_DEVICETYPE_RAW_BASES:
+            direct_url = f"{base}/{mk}.yaml"
+            if direct_url not in candidate_urls:
+                candidate_urls.append(direct_url)
+
+    for url in candidate_urls:
+        attempted_urls.append(url)
+        try:
+            resp = requests.get(url, timeout=60)
+        except Exception:
+            continue
+        if not (200 <= resp.status_code < 300):
+            continue
+        ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
+        if not ports:
+            continue
+        _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = url
+        _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
+        return set(ports), None
+
+    try:
+        index_map = _load_netbox_juniper_model_download_urls()
+    except Exception as exc:
+        return None, f"unable to load NetBox Juniper index ({exc}) for model {model_key}"
+
+    download_url = None
+    for mk in model_keys:
+        if mk in index_map:
+            download_url = index_map[mk]
+            break
+    if not download_url:
+        attempted = ", ".join(attempted_urls[:2])
+        return None, f"no NetBox device-type YAML found for model {model_key}; tried {attempted}"
+
+    attempted_urls.append(download_url)
+    try:
+        resp = requests.get(download_url, timeout=60)
+    except Exception as exc:
+        return None, f"failed to fetch NetBox YAML for model {model_key} ({exc})"
+    if not (200 <= resp.status_code < 300):
+        return None, f"failed to fetch NetBox YAML for model {model_key} (HTTP {resp.status_code})"
+
+    ports = _extract_physical_port_ids_from_devicetype_yaml(resp.text)
+    if not ports:
+        return None, f"NetBox YAML for model {model_key} did not contain physical interfaces"
+    _NETBOX_DEVICE_TYPE_URL_CACHE[model_key] = download_url
+    _NETBOX_MODEL_PORT_CACHE[model_key] = set(ports)
+    return set(ports), None
+
+
+def _get_switch_physical_ports_for_model(model: Optional[str]) -> Optional[Set[str]]:
+    ports, _ = _get_switch_physical_ports_for_model_with_diagnostics(model)
+    return ports
+
+
+def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
+    """Return normalized physical switch port IDs from Mist ``if_stat`` payload."""
+    if not isinstance(if_stat, Mapping):
+        return set()
+
+    physical_ports: Set[str] = set()
+    for key, value in if_stat.items():
+        port_id: str = ""
+        if isinstance(value, Mapping):
+            raw_port_id = value.get("port_id")
+            if isinstance(raw_port_id, str):
+                port_id = raw_port_id.strip()
+        if not port_id and isinstance(key, str):
+            port_id = key.split(".", 1)[0].strip()
+        if not port_id:
+            continue
+        if pm.MIST_IF_RE.match(port_id):
+            physical_ports.add(port_id)
+    return physical_ports
+
+
+
+def _resolve_interface_name_from_available_ports(
+    ifname: str,
+    available_physical_ports: Set[str],
+) -> Optional[str]:
+    """Resolve an interface name to an available physical port ID.
+
+    Resolution is data-driven from destination switch interfaces and avoids
+    model-specific assumptions.
+    """
+    candidate = str(ifname or "").strip()
+    if not candidate:
+        return None
+    if candidate in available_physical_ports:
+        return candidate
+
+    m = pm.MIST_IF_RE.match(candidate)
+    if not m:
+        return None
+
+    itype = m.group("type")
+    if itype in {"ge", "mge"}:
+        alt_type = "ge" if itype == "mge" else "mge"
+        alt = f"{alt_type}-{m.group('member')}/{m.group('pic')}/{m.group('port')}"
+        if alt in available_physical_ports:
+            return alt
+
+    return None
+
+
+def _build_dynamic_destination_port_map(
+    temp_interfaces: Sequence[Any],
+    available_physical_ports: Set[str],
+) -> Dict[str, str]:
+    """Map converted interface names to destination ports using source numbering.
+
+    Uses Cisco source interface numbering from ``interfaces[*].name`` and maps to
+    destination physical ports discovered from Mist ``if_stat.port_id``.
+    """
+    parsed_dest: Dict[Tuple[int, int], str] = {}
+    by_member: Dict[int, List[Tuple[int, str]]] = {}
+    for ifname in sorted(available_physical_ports):
+        m = pm.MIST_IF_RE.match(ifname)
+        if not m:
+            continue
+        member = int(m.group("member"))
+        pic = int(m.group("pic"))
+        port = int(m.group("port"))
+        if pic == 0 and (member, port) not in parsed_dest:
+            parsed_dest[(member, port)] = ifname
+        by_member.setdefault(member, []).append((port, ifname))
+
+    for member in by_member:
+        by_member[member].sort(key=lambda item: (item[0], item[1]))
+
+    def _extract_source_member_port(source_name: str) -> Optional[Tuple[int, int]]:
+        text = str(source_name or "").strip()
+        mist_match = pm.MIST_IF_RE.match(text)
+        if mist_match:
+            return (int(mist_match.group("member")), int(mist_match.group("port")))
+
+        nums = [int(x) for x in re.findall(r"\d+", text)]
+        if not nums:
+            return None
+        return (max(nums[0] - 1, 0), max(nums[-1] - 1, 0))
+
+    mapping: Dict[str, str] = {}
+    used_dest: Set[str] = set()
+
+    for entry in temp_interfaces:
+        if not isinstance(entry, Mapping):
+            continue
+        src_key = str(entry.get("juniper_if") or entry.get("name") or "").strip()
+        if not src_key:
+            continue
+
+        src_pair = _extract_source_member_port(str(entry.get("name") or ""))
+        candidate: Optional[str] = None
+        if src_pair is not None:
+            candidate = parsed_dest.get(src_pair)
+            if candidate is None:
+                member, port = src_pair
+                member_ports = by_member.get(member) or []
+                if 0 <= port < len(member_ports):
+                    candidate = member_ports[port][1]
+
+        if candidate is None:
+            candidate = _resolve_interface_name_from_available_ports(src_key, available_physical_ports)
+
+        if not candidate or candidate in used_dest:
+            continue
+        mapping[src_key] = candidate
+        used_dest.add(candidate)
+
+    return mapping
+
+
+
+def _extract_physical_port_ids_from_if_stat(if_stat: Any) -> Set[str]:
+    """Return normalized physical switch port IDs from Mist ``if_stat`` payload."""
+    if not isinstance(if_stat, Mapping):
+        return set()
+
+    physical_ports: Set[str] = set()
+    for key, value in if_stat.items():
+        port_id: str = ""
+        if isinstance(value, Mapping):
+            raw_port_id = value.get("port_id")
+            if isinstance(raw_port_id, str):
+                port_id = raw_port_id.strip()
+        if not port_id and isinstance(key, str):
+            port_id = key.split(".", 1)[0].strip()
+        if not port_id:
+            continue
+        if pm.MIST_IF_RE.match(port_id):
+            physical_ports.add(port_id)
+    return physical_ports
+
+
+def _get_switch_physical_ports(
+    base_url: str,
+    headers: Mapping[str, str],
+    site_id: str,
+    device_id: str,
+) -> Optional[Set[str]]:
+    stats = _mist_get_json(
+        base_url,
+        headers,
+        f"/sites/{site_id}/stats/devices/{device_id}?type=switch",
+        optional=True,
+    )
+    if not isinstance(stats, Mapping):
+        return None
+
+    if_stat = stats.get("if_stat")
+    ports = _extract_physical_port_ids_from_if_stat(if_stat)
+    return ports if ports else None
+
 def _derive_port_config_from_config_cmd(
     base_url: str,
     token: str,
@@ -4177,7 +4568,13 @@ def _derive_port_config_from_config_cmd(
     if not port_config:
         return port_config
 
-    if not device_model and not member_models:
+    physical_ports: Optional[Set[str]] = None
+    try:
+        physical_ports, _ = _get_switch_physical_ports_for_model_with_diagnostics(device_model)
+    except Exception:
+        physical_ports = None
+
+    if not device_model and not member_models and not physical_ports:
         return port_config
 
     allowed_members = set(member_models.keys()) if member_models else {0}
@@ -4190,19 +4587,21 @@ def _derive_port_config_from_config_cmd(
         member = int(m.group("member"))
         if member not in allowed_members:
             continue
-        model = member_models.get(member) or device_model
-        mk = pm._model_key(model)
-        caps = pm.MODEL_CAPS.get(mk) if mk else None
-        if not caps:
-            filtered[ifname] = cfg
+
+        if physical_ports is not None:
+            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, physical_ports)
+            if not resolved_ifname:
+                continue
+            filtered[resolved_ifname] = cfg
             continue
-        pic = int(m.group("pic"))
-        port = int(m.group("port"))
-        if pic == 0 and port >= caps["access_pic0"]:
-            continue
-        if pic == 2 and port >= caps.get("uplink_pic2", 0):
-            continue
+
         filtered[ifname] = cfg
+
+    if not filtered and physical_ports is not None:
+        for ifname, cfg in port_config.items():
+            resolved_ifname = _resolve_interface_name_from_available_ports(ifname, physical_ports)
+            if resolved_ifname:
+                filtered[resolved_ifname] = cfg
     return filtered
 
 
@@ -4211,7 +4610,9 @@ def _derive_port_config_from_port_profiles(
     token: str,
     site_id: str,
     device_id: str,
+    model_hint: Optional[str] = None,
     preserve_usage_names: Optional[Set[str]] = None,
+    include_decisions: bool = False,
 ) -> Dict[str, Any]:
     headers = _mist_headers(token)
     preserve_usage_names = set(preserve_usage_names or set())
@@ -4224,6 +4625,32 @@ def _derive_port_config_from_port_profiles(
     )
     if not isinstance(device_info, Mapping):
         return {}
+
+    device_model: Optional[str] = None
+    member_models: Dict[int, Optional[str]] = {}
+    raw_model = device_info.get("model")
+    if isinstance(raw_model, str) and raw_model.strip():
+        device_model = raw_model.strip()
+    vc_data = device_info.get("virtual_chassis")
+    members: Optional[Sequence[Any]] = None
+    if isinstance(vc_data, Mapping):
+        maybe_members = vc_data.get("members") or vc_data.get("devices")
+        if isinstance(maybe_members, Sequence) and not isinstance(maybe_members, (str, bytes, bytearray)):
+            members = maybe_members
+    elif isinstance(vc_data, Sequence) and not isinstance(vc_data, (str, bytes, bytearray)):
+        members = vc_data
+    if members:
+        for member in members:
+            if not isinstance(member, Mapping):
+                continue
+            member_id = _int_or_none(member.get("member_id") or member.get("member") or member.get("id") or member.get("slot"))
+            if member_id is None:
+                continue
+            member_model = member.get("model") or member.get("device_model")
+            if isinstance(member_model, str) and member_model.strip():
+                member_models[member_id] = member_model.strip()
+            else:
+                member_models[member_id] = None
 
     port_config = device_info.get("port_config")
     if not isinstance(port_config, Mapping):
@@ -4287,56 +4714,127 @@ def _derive_port_config_from_port_profiles(
     rules = pm.RULES_DOC.get("rules", []) if isinstance(pm.RULES_DOC, Mapping) else []
 
     derived_config: Dict[str, Dict[str, Any]] = {}
+    decisions: List[Dict[str, Any]] = []
     for port_id, entry in port_config.items():
         if not isinstance(port_id, str) or not port_id.strip():
             continue
         if not isinstance(entry, Mapping):
             continue
+
+        normalized_port_id = port_id
+        port_match = pm.MIST_IF_RE.match(port_id)
+        if port_match:
+            member = int(port_match.group("member"))
+            model_for_port = member_models.get(member) or device_model or model_hint
+            if model_hint:
+                selected_model_key = pm._model_key(model_for_port)
+                hinted_model_key = pm._model_key(model_hint)
+                if hinted_model_key in pm.MODEL_CAPS and selected_model_key not in pm.MODEL_CAPS:
+                    model_for_port = model_hint
+            normalized_port_id = port_id
+
         usage_name = str(entry.get("usage") or "").strip()
-        if usage_name and usage_name in preserve_usage_names:
-            derived_config[port_id] = _compact_dict(dict(entry))
-            continue
         usage_config = port_usages.get(usage_name) if usage_name else None
         if not isinstance(usage_config, Mapping):
             usage_config = {}
+
+        preserve_usage = usage_name and usage_name in preserve_usage_names
+        if preserve_usage and str(usage_config.get("mode") or "").strip().lower() != "trunk":
+            preserved_entry = _compact_dict(dict(entry))
+            derived_config[normalized_port_id] = preserved_entry
+            if include_decisions:
+                decisions.append(
+                    {
+                        "port_id": port_id,
+                        "source_usage": usage_name,
+                        "result_usage": str(preserved_entry.get("usage") or usage_name or ""),
+                        "preserved": True,
+                        "reason": "usage name is in preserve_usage_names",
+                    }
+                )
+            continue
 
         port_network = usage_config.get("port_network")
         voip_network = usage_config.get("voip_network")
         native_network = usage_config.get("native_network")
         networks = usage_config.get("networks") or usage_config.get("dynamic_vlan_networks") or []
 
+        data_vlan = _vlan_for_network(port_network)
+        native_vlan = _vlan_for_network(native_network)
+        mode_value = usage_config.get("mode")
+        if (
+            str(mode_value or "").strip().lower() == "trunk"
+            and native_vlan is None
+            and data_vlan is not None
+        ):
+            # Legacy AUTO_TRUNK profiles often only populate `port_network`.
+            # Treat that VLAN as native when explicit `native_network` is absent
+            # so trunk-native rules continue to match.
+            native_vlan = data_vlan
+
         intf = {
-            "name": port_id,
-            "juniper_if": port_id,
-            "mode": usage_config.get("mode"),
+            "name": normalized_port_id,
+            "juniper_if": normalized_port_id,
+            "mode": mode_value,
             "description": entry.get("description") or usage_config.get("description"),
             "port_network": port_network,
             "voip_network": voip_network,
             "native_network": native_network,
             "networks": networks,
-            "data_vlan": _vlan_for_network(port_network),
+            "data_vlan": data_vlan,
             "voice_vlan": _vlan_for_network(voip_network),
-            "native_vlan": _vlan_for_network(native_network),
+            "native_vlan": native_vlan,
             "allowed_vlans": _vlan_list_for_networks(networks),
         }
 
         chosen_usage: Optional[str] = None
-        for rule in rules:
+        matched_rule_name: Optional[str] = None
+        evaluated_rules: List[Dict[str, Any]] = []
+        for idx, rule in enumerate(rules, 1):
             if not isinstance(rule, Mapping):
                 continue
             when = rule.get("when", {}) or {}
             if not isinstance(when, Mapping):
                 continue
-            if pm.evaluate_rule(when, intf):
+            matched = pm.evaluate_rule(when, intf)
+            if include_decisions:
+                evaluated_rules.append(
+                    {
+                        "index": idx,
+                        "name": str(rule.get("name") or f"rule-{idx}"),
+                        "matched": bool(matched),
+                        "when": dict(when),
+                    }
+                )
+            if matched:
                 set_cfg = rule.get("set", {}) or {}
                 if isinstance(set_cfg, Mapping):
                     chosen_usage = set_cfg.get("usage") or chosen_usage
+                matched_rule_name = str(rule.get("name") or f"rule-{idx}")
                 break
 
-        derived_config[port_id] = {
-            "usage": chosen_usage or "blackhole",
+        result_usage = str(chosen_usage or "blackhole")
+        derived_config[normalized_port_id] = {
+            "usage": result_usage,
         }
+        if include_decisions:
+            decisions.append(
+                {
+                    "port_id": port_id,
+                    "source_usage": usage_name,
+                    "result_usage": result_usage,
+                    "preserved": False,
+                    "matched_rule": matched_rule_name,
+                    "interface": _compact_dict(dict(intf)),
+                    "evaluated_rules": evaluated_rules,
+                }
+            )
 
+    if include_decisions:
+        return {
+            "port_config": derived_config,
+            "decisions": decisions,
+        }
     return derived_config
 
 
@@ -4727,6 +5225,7 @@ def _remove_temporary_config_for_rows(
     preserve_legacy_vlans = bool(preserve_legacy_vlans and effective_legacy_vlan_ids)
 
     derived_payloads: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    derivation_decisions: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     derivation_warnings: Dict[Tuple[str, str], str] = {}
 
     def _collect_site_cleanup_targets(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -4819,14 +5318,38 @@ def _remove_temporary_config_for_rows(
         if not site_id or not device_id:
             continue
         preserve_usages = preserved_usage_names_by_site.get(site_id, set())
+        model_hint = str(row.get("_model_hint") or "").strip() or None
         try:
-            port_config = _derive_port_config_from_port_profiles(
+            derived_result = _derive_port_config_from_port_profiles(
                 base_url,
                 token,
                 site_id,
                 device_id,
+                model_hint=model_hint,
                 preserve_usage_names=preserve_usages,
+                include_decisions=True,
             )
+            port_config: Dict[str, Any] = {}
+            decisions: List[Dict[str, Any]] = []
+            if isinstance(derived_result, Mapping) and "port_config" in derived_result:
+                raw_pc = derived_result.get("port_config")
+                if isinstance(raw_pc, Mapping):
+                    port_config = dict(raw_pc)
+                raw_decisions = derived_result.get("decisions")
+                if isinstance(raw_decisions, list):
+                    decisions = [d for d in raw_decisions if isinstance(d, Mapping)]
+            elif isinstance(derived_result, Mapping):
+                port_config = dict(derived_result)
+
+            if decisions:
+                derivation_decisions[key] = decisions
+                action_logger.info(
+                    "lcm_step3_port_profile_decisions site=%s device=%s decisions=%s",
+                    site_id,
+                    device_id,
+                    json.dumps(decisions, separators=(",", ":"), default=str),
+                )
+
             if port_config:
                 derived_payloads[key] = {"port_config": port_config}
             else:
@@ -4847,6 +5370,9 @@ def _remove_temporary_config_for_rows(
                 "cleanup_request": copy.deepcopy(cleanup_payload),
                 "push_request": copy.deepcopy(final_payload) if isinstance(final_payload, Mapping) else {},
             }
+            decisions = derivation_decisions.get(key)
+            if decisions:
+                preview_payload["port_profile_decisions"] = decisions
             warn_text = derivation_warnings.get(key)
             if warn_text:
                 preview_payload["derivation_warning"] = warn_text
@@ -4857,6 +5383,7 @@ def _remove_temporary_config_for_rows(
                     "payload": {
                         "cleanup_request": cleanup_payload,
                         "push_request": final_payload,
+                        "port_profile_decisions": derivation_decisions.get(key, []),
                     },
                 }
             )
@@ -5229,6 +5756,8 @@ async def api_push_batch(
                 row_result["row_index"] = i
                 row_result["site_id"] = site_id
                 row_result["device_id"] = device_id
+                if isinstance(row_model_override, str) and row_model_override.strip():
+                    row_result["_model_hint"] = row_model_override.strip()
                 payload_for_reuse = row_result.get("payload")
                 if isinstance(payload_for_reuse, Mapping):
                     row_result["_site_deployment_payload"] = copy.deepcopy(payload_for_reuse)
@@ -5380,6 +5909,7 @@ async def api_push_batch(
         if isinstance(row, dict):
             row.pop("_temp_config_source", None)
             row.pop("_site_deployment_payload", None)
+            row.pop("_model_hint", None)
 
     top_ok = all(r.get("ok") for r in results) if results else False
     phase_ok = all(status.get("ok") or status.get("skipped") for status in phase_status.values())

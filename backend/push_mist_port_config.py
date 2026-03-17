@@ -54,15 +54,22 @@ TZ        = "America/New_York"
 # Rules (first match wins) — kept compact & readable
 # -------------------------------
 RULES_PATH = Path(__file__).with_name("port_rules.json")
+RULES_LOCAL_PATH = Path(__file__).with_name("port_rules.local.json")
+RULES_SAMPLE_PATH = Path(__file__).with_name("port_rules.sample.json")
 
 
-def load_rules(path: Path = RULES_PATH) -> Dict[str, Any]:
+def load_rules(path: Optional[Path] = None) -> Dict[str, Any]:
     """Load rule document from JSON file."""
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:
-        return {"rules": []}
+    candidates = [path] if path is not None else [RULES_LOCAL_PATH, RULES_PATH, RULES_SAMPLE_PATH]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            continue
+    return {"rules": []}
 
 
 RULES_DOC: Dict[str, Any] = load_rules()
@@ -85,6 +92,7 @@ def validate_rules_doc(doc: Dict[str, Any]) -> None:
         "voice_vlan",
         "native_vlan",
         "allowed_vlans",
+        "poe_active",
         "has_voice",
         "description_regex",
         "name_regex",
@@ -130,6 +138,8 @@ def validate_rules_doc(doc: Dict[str, Any]) -> None:
                     raise ValueError(f"Rule {idx} has invalid regex: {e}")
             if k == "has_voice" and not isinstance(v, bool):
                 raise ValueError("has_voice condition must be boolean")
+            if k == "poe_active" and not isinstance(v, bool):
+                raise ValueError("poe_active condition must be boolean")
             if k == "any" and not isinstance(v, bool):
                 raise ValueError("any condition must be boolean")
         setp = rule.get("set", {})
@@ -212,6 +222,19 @@ def evaluate_rule(when: Dict[str, Any], intf: Dict[str, Any]) -> bool:
     voice_vlan  = int(intf["voice_vlan"])  if intf.get("voice_vlan")  is not None else None
     native_vlan = int(intf["native_vlan"]) if intf.get("native_vlan") is not None else None
     allowed_vlans_set  = set(_normalize_vlan_list(intf.get("allowed_vlans")))
+    poe_active = intf.get("poe_active")
+    if poe_active is None:
+        poe_on = intf.get("poe_on")
+        if isinstance(poe_on, bool):
+            poe_active = poe_on
+        else:
+            power_draw = intf.get("power_draw")
+            try:
+                poe_active = float(power_draw) > 0.0
+            except (TypeError, ValueError):
+                poe_active = False
+    else:
+        poe_active = bool(poe_active)
     name       = intf.get("name") or ""
     juniper_if = intf.get("juniper_if") or ""
     port_network = intf.get("port_network")
@@ -233,6 +256,8 @@ def evaluate_rule(when: Dict[str, Any], intf: Dict[str, Any]) -> bool:
             if native_vlan != int(v): return False
         elif k == "allowed_vlans":
             if allowed_vlans_set != set(_normalize_vlan_list(v)): return False
+        elif k == "poe_active":
+            if bool(poe_active) != bool(v): return False
         elif k == "has_voice":
             if bool(voice_vlan) != bool(v): return False
         elif k == "description_regex":
@@ -283,9 +308,10 @@ def index_to_ex4100_if(model: Optional[str], index_1based: int) -> Optional[str]
     if index_1based is None or index_1based <= 0:
         return None
     p = index_1based - 1
-    if model and model.startswith("EX4100-48MP"):
+    mk = _model_key(model)
+    if mk == "EX4100-48MP":
         return f"mge-0/0/{p}" if 0 <= p <= 15 else f"ge-0/0/{p}"
-    if model and model.startswith("EX4100-24MP"):
+    if mk == "EX4100-24MP":
         return f"mge-0/0/{p}" if 0 <= p <= 7 else f"ge-0/0/{p}"
     return f"ge-0/0/{p}"
 
@@ -302,6 +328,7 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
         return None
     sw, mod, port = p["sw"], p["mod"], p["port"]
     member = max(sw - 1, 0)
+    mk = _model_key(model)
 
     if mod == 1:
         pic, jport = 2, port - 1
@@ -310,9 +337,9 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
 
     if mod == 0:
         pic, jport = 0, port - 1
-        if model and model.startswith("EX4100-48MP"):
+        if mk == "EX4100-48MP":
             itype = "mge" if 0 <= jport <= 15 else "ge"
-        elif model and model.startswith("EX4100-24MP"):
+        elif mk == "EX4100-24MP":
             itype = "mge" if 0 <= jport <= 7 else "ge"
         else:
             itype = "ge"
@@ -325,9 +352,9 @@ def cisco_to_ex_if_enhanced(model: Optional[str], name: str) -> Optional[str]:
         return f"{itype}-{member}/{pic}/{jport}"
 
     pic, jport = 0, port - 1
-    if model and model.startswith("EX4100-48MP"):
+    if mk == "EX4100-48MP":
         itype = "mge" if 0 <= jport <= 15 else "ge"
-    elif model and model.startswith("EX4100-24MP"):
+    elif mk == "EX4100-24MP":
         itype = "mge" if 0 <= jport <= 7 else "ge"
     else:
         itype = "ge"
@@ -485,7 +512,7 @@ def _model_key(model: Optional[str]) -> Optional[str]:
     if not model:
         return None
     m = model.strip().upper()
-    for k in MODEL_CAPS.keys():
+    for k in sorted(MODEL_CAPS.keys(), key=len, reverse=True):
         if m.startswith(k.upper()):
             return k
     return m
@@ -638,3 +665,4 @@ if __name__ == "__main__":
     except PortConfigError as exc:  # pragma: no cover - CLI convenience
         print(f"❌ {exc}")
         raise SystemExit(2)
+    mk = _model_key(model)
