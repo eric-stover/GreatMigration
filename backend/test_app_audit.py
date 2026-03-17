@@ -850,6 +850,56 @@ def test_derive_port_config_does_not_preserve_trunk_usage_names(monkeypatch, app
     assert decision["preserved"] is False
     assert decision["matched_rule"] == "to-ap"
 
+def test_derive_port_config_trunk_port_network_falls_back_to_native_vlan(monkeypatch, app_module):
+    device_info = {
+        "port_config": {
+            "mge-0/0/15": {
+                "usage": "legacy_AUTO_TRUNK_N3_POE",
+                "description": "Access point -NASPRLWAP03",
+            },
+        }
+    }
+    derived_settings = {
+        "port_usages": {
+            "legacy_AUTO_TRUNK_N3_POE": {
+                "mode": "trunk",
+                "port_network": "legacy_data",
+            },
+        },
+        "networks": {"legacy_data": {"vlan_id": 3}},
+    }
+
+    def fake_get_json(base_url: str, headers: Dict[str, str], path: str, optional: bool = False):
+        if path.endswith("/setting/derived"):
+            return derived_settings
+        return device_info
+
+    monkeypatch.setattr(app_module, "_mist_get_json", fake_get_json)
+    monkeypatch.setattr(
+        app_module.pm,
+        "RULES_DOC",
+        {
+            "rules": [
+                {"name": "ap-native-3", "when": {"mode": "trunk", "native_vlan": 3}, "set": {"usage": "ap"}},
+                {"name": "catch-all-blackhole", "when": {"any": True}, "set": {"usage": "blackhole"}},
+            ]
+        },
+    )
+
+    derived = app_module._derive_port_config_from_port_profiles(
+        "https://example.com/api/v1",
+        "token",
+        "site-1",
+        "device-1",
+        include_decisions=True,
+    )
+
+    assert derived["port_config"]["mge-0/0/15"]["usage"] == "ap"
+    decision = derived["decisions"][0]
+    assert decision["matched_rule"] == "ap-native-3"
+    assert decision["interface"]["native_vlan"] == 3
+
+
 def test_derive_port_config_returns_decisions_when_requested(monkeypatch, app_module):
     device_info = {
         "port_config": {
