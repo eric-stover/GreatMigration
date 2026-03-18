@@ -19,6 +19,7 @@ Most workflows support non-destructive review before any push action is availabl
 - [Feature overview](#feature-overview)
   - [Hardware conversion](#hardware-conversion)
   - [Port profile rules](#port-profile-rules)
+  - [Standards](#standards)
   - [Config conversion](#config-conversion)
   - [Compliance audit & 1 Click Fix](#compliance-audit--1-click-fix)
 - [Hamburger menu guide](#hamburger-menu-guide)
@@ -106,6 +107,38 @@ Port Profile Rules provide deterministic logic for assigning Mist port usages fr
 
 - Rule updates do not change devices by themselves.
 - You can validate rule effects through stage/test workflows before any live push.
+
+### Standards
+
+Standards gives you a live firmware baseline view so operators can see what versions should be targeted before migrations and audits.
+
+**What it does**
+
+- Displays a model-by-model firmware standards matrix for switches and APs.
+- Shows multiple historical standards (Standard 1..N) so you can compare recency and baseline drift.
+- Supports fast client-side filtering by model, device type, or version string.
+- Exposes refresh timestamp metadata to confirm when the standards cache was last generated.
+
+**How to use**
+
+1. Open **Standards** from the menu.
+2. Review **Standard 1** first (this is the primary baseline, including ZTP target for switches).
+3. Use the filter box to find a specific model family or version.
+4. Confirm required firmware expectations before running conversion push workflows or audit fixes.
+
+**How it works**
+
+- The Standards page (`/standards`) loads a table from `/api/standards`.
+- The backend builds a normalized matrix from `standard_fw_versions.json`, flattening switch/AP model data into rows.
+- Each row is padded/truncated to a fixed number of standard columns so comparisons are consistent.
+- Firmware standards data is refreshed through compliance logic that updates the cache from Mist API suggested versions when stale.
+- When Standard 1 changes, the automation syncs the org switch **auto-upgrade custom version** target for onboarding/zero-touch provisioning workflows; this does **not** retroactively upgrade switches that are already connected and managed.
+
+**Safety notes**
+
+- Standards is a **read-only reference workflow**.
+- Viewing/filtering the table does not make any device changes.
+- It is intended to be consulted before change workflows and during post-change validation.
 
 ### Config conversion
 
