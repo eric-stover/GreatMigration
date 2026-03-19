@@ -15,6 +15,7 @@ from compliance import (
     ConfigurationOverridesCheck,
     FirmwareManagementCheck,
     CloudManagementCheck,
+    SwitchPowerSupplyHealthCheck,
     SpareSwitchPresenceCheck,
     DeviceNamingConventionCheck,
     DeviceDocumentationCheck,
@@ -1175,6 +1176,109 @@ def test_cloud_management_check_ignores_non_switch_devices():
     )
 
     check = CloudManagementCheck()
+    assert check.run(ctx) == []
+
+
+def test_switch_power_supply_health_flags_single_switch_failed_psu():
+    ctx = SiteContext(
+        site_id="site-psu-1",
+        site_name="Branch",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-1",
+                "name": "SW-1",
+                "type": "switch",
+                "psus": [
+                    {"name": "PSU 0", "status": "ok", "description": "Present and healthy"},
+                    {"name": "PSU 1", "status": "missing", "description": "Not inserted"},
+                ],
+            },
+        ],
+    )
+
+    check = SwitchPowerSupplyHealthCheck()
+    findings = check.run(ctx)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.device_id == "sw-1"
+    assert "PSU 1 status 'missing'" in finding.message
+    assert finding.details == {
+        "psu_issues": [
+            {
+                "name": "PSU 1",
+                "status": "missing",
+                "description": "Not inserted",
+                "slot": None,
+            }
+        ]
+    }
+
+
+def test_switch_power_supply_health_flags_stack_with_slot_details():
+    ctx = SiteContext(
+        site_id="site-psu-2",
+        site_name="HQ",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-stack-1",
+                "name": "SW-STACK-1",
+                "type": "switch",
+                "psus": [
+                    {"name": "PSU 0", "status": "ok", "description": "switch 0"},
+                    {"name": "PSU 1", "status": "missing", "description": "switch 0"},
+                    {"name": "PSU 0", "status": "ok", "description": "switch 1"},
+                    {"name": "PSU 1", "status": "ok", "description": "switch 1"},
+                ],
+            },
+        ],
+    )
+
+    check = SwitchPowerSupplyHealthCheck()
+    findings = check.run(ctx)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "switch slot 0 PSU 1 status 'missing'" in finding.message
+    assert finding.details == {
+        "psu_issues": [
+            {
+                "name": "PSU 1",
+                "status": "missing",
+                "description": "switch 0",
+                "slot": "0",
+            }
+        ]
+    }
+
+
+def test_switch_power_supply_health_passes_when_all_psus_ok():
+    ctx = SiteContext(
+        site_id="site-psu-3",
+        site_name="Branch",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-2",
+                "name": "SW-2",
+                "type": "switch",
+                "psus": [
+                    {"name": "PSU 0", "status": "ok", "description": "Present and healthy"},
+                    {"name": "PSU 1", "status": "ok", "description": "Present and healthy"},
+                ],
+            },
+        ],
+    )
+
+    check = SwitchPowerSupplyHealthCheck()
     assert check.run(ctx) == []
 
 
