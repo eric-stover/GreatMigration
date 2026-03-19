@@ -319,12 +319,12 @@ def test_execute_action_targets_specific_device(monkeypatch):
     change = summary["changes"][0]
     assert change["device_id"] == "dev2"
     assert change["old_name"] == "NALABIDF5AP2"
-    assert change["new_name"] == "NACHIIDF1AP1"
+    assert change["new_name"] == "NACHIIDF1AP2"
     assert change["status"] == "success"
     assert change["message"] == "Success!"
     assert len(calls["put"]) == 1
     assert calls["put"][0][0].endswith("/devices/dev2")
-    assert calls["put"][0][1] == {"name": "NACHIIDF1AP1"}
+    assert calls["put"][0][1] == {"name": "NACHIIDF1AP2"}
 
 
 def test_execute_action_assigns_unique_suffixes(monkeypatch):
@@ -444,8 +444,42 @@ def test_execute_action_reports_rename_failure(monkeypatch):
     error = summary["errors"][0]
     assert error["reason"] == "Change Failed! Please see device logs"
     details = error.get("details") or {}
-    assert details.get("attempted_name") == "NACHIIDF1AP1"
+    assert details.get("attempted_name") == "NACHIIDF1AP2"
     assert "Rename failed" in (details.get("error") or "")
+
+
+def test_execute_action_preserves_trailing_number_when_name_is_malformed(monkeypatch):
+    calls = {"put": []}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/sites/site-1"):
+            return DummyResponse({"name": "Site One"})
+        if url.endswith("/sites/site-1/devices"):
+            return DummyResponse([{"id": "dev1", "mac": "AA:BB:CC", "name": "Lobby AP-27"}])
+        if url.endswith("/sites/site-1/stats/devices/dev1"):
+            return DummyResponse({"stats": {"lldp_stats": [{"neighbor": {"system_name": "NACHIIDF1AS1"}}]}})
+        raise AssertionError(f"Unexpected GET {url}")
+
+    def fake_put(url, headers=None, json=None, timeout=None):
+        calls["put"].append((url, json))
+        return DummyResponse({})
+
+    monkeypatch.setattr("audit_fixes.requests.get", fake_get)
+    monkeypatch.setattr("audit_fixes.requests.put", fake_put)
+
+    result = execute_audit_action(
+        AP_RENAME_ACTION_ID,
+        "https://api.mist.test/api/v1",
+        "token",
+        ["site-1"],
+        dry_run=False,
+        pause=0,
+    )
+
+    assert result["ok"] is True
+    summary = result["results"][0]
+    assert summary["renamed"] == 1
+    assert calls["put"][0][1] == {"name": "NACHIIDF1AP27"}
 
 def test_execute_dns_override_action_updates_payload(monkeypatch):
     calls = {"get": [], "put": []}
