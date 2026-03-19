@@ -1166,6 +1166,77 @@ def _is_access_point(device: Dict[str, Any]) -> bool:
     return False
 
 
+def _iter_psu_entries(raw_psus: Any) -> Iterable[Dict[str, Any]]:
+    if isinstance(raw_psus, dict):
+        yield raw_psus
+        return
+    if isinstance(raw_psus, list):
+        for item in raw_psus:
+            if isinstance(item, dict):
+                yield item
+            elif isinstance(item, list):
+                for nested in item:
+                    if isinstance(nested, dict):
+                        yield nested
+
+
+def _extract_module_slot(module: Mapping[str, Any]) -> Optional[str]:
+    for key in ("_idx", "fpc_idx", "slot", "slot_id", "member_id", "node_id", "unit"):
+        value = module.get(key)
+        if isinstance(value, (int, float)):
+            return str(int(value))
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _iter_device_psu_entries(device: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
+    for psu in _iter_psu_entries(device.get("psus")):
+        yield dict(psu)
+
+    module_stat = device.get("module_stat")
+    if not isinstance(module_stat, list):
+        return
+
+    for module in module_stat:
+        if not isinstance(module, Mapping):
+            continue
+        module_slot = _extract_module_slot(module)
+        for psu in _iter_psu_entries(module.get("psus")):
+            entry = dict(psu)
+            if module_slot and not entry.get("slot"):
+                entry["slot"] = module_slot
+            yield entry
+
+
+def _extract_psu_slot(psu: Mapping[str, Any]) -> Optional[str]:
+    for key in ("slot", "slot_id", "switch_id", "member_id", "node_id", "unit", "stack_member"):
+        value = psu.get(key)
+        if isinstance(value, (int, float)):
+            return str(int(value))
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for candidate in (psu.get("name"), psu.get("description")):
+        if not isinstance(candidate, str):
+            continue
+        for pattern in (
+            r"(?:switch|member|slot|node|unit)\s*([0-9]+)",
+            r"fpc\s*([0-9]+)",
+        ):
+            match = re.search(pattern, candidate, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _extract_psu_label(psu: Mapping[str, Any], index: int) -> str:
+    name = psu.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return f"PSU {index}"
+
+
 def _extract_firmware_version(device: Mapping[str, Any]) -> str:
     """Return a firmware version string from a device payload when possible."""
 
@@ -2488,6 +2559,75 @@ class CloudManagementCheck(ComplianceCheck):
         return findings
 
 
+class SwitchPowerSupplyHealthCheck(ComplianceCheck):
+    id = "switch_power_supply_health"
+    name = "Switch power supply health"
+    description = "Ensure every switch power supply reports healthy status."
+    severity = "warning"
+
+    def run(self, context: SiteContext) -> List[Finding]:
+        findings: List[Finding] = []
+
+        for device in context.devices:
+            if not isinstance(device, dict):
+                continue
+            if not _is_switch(device):
+                continue
+
+            psu_entries = list(_iter_device_psu_entries(device))
+            if not psu_entries:
+                continue
+
+            failed_psus: List[Dict[str, Any]] = []
+            for idx, psu in enumerate(psu_entries):
+                status_raw = psu.get("status")
+                status = str(status_raw).strip().lower() if status_raw is not None else ""
+                if status == "ok":
+                    continue
+                failed_psus.append(
+                    {
+                        "name": _extract_psu_label(psu, idx),
+                        "status": status_raw,
+                        "description": psu.get("description"),
+                        "slot": _extract_psu_slot(psu),
+                    }
+                )
+
+            if not failed_psus:
+                continue
+
+            device_id = str(device.get("id")) if device.get("id") is not None else None
+            device_name = _normalize_site_name(device) or device_id or "device"
+
+            issue_fragments: List[str] = []
+            for issue in failed_psus:
+                slot = issue.get("slot")
+                label = str(issue.get("name") or "PSU")
+                status_value = issue.get("status")
+                status_text = str(status_value).strip() if status_value is not None else "unknown"
+                fragment = f"{label} status '{status_text}'"
+                if slot:
+                    fragment = f"switch slot {slot} {fragment}"
+                issue_fragments.append(fragment)
+
+            findings.append(
+                Finding(
+                    site_id=context.site_id,
+                    site_name=context.site_name,
+                    device_id=device_id,
+                    device_name=device_name,
+                    message=(
+                        f"Switch '{device_name}' has PSU issues: "
+                        + "; ".join(issue_fragments)
+                        + "."
+                    ),
+                    details={"psu_issues": failed_psus},
+                )
+            )
+
+        return findings
+
+
 class SpareSwitchPresenceCheck(ComplianceCheck):
     id = "spare_switch_presence"
     name = "Spare switch presence"
@@ -2924,6 +3064,7 @@ DEFAULT_CHECKS: Sequence[ComplianceCheck] = (
     ConfigurationOverridesCheck(),
     FirmwareManagementCheck(),
     CloudManagementCheck(),
+    SwitchPowerSupplyHealthCheck(),
     SpareSwitchPresenceCheck(),
     DeviceNamingConventionCheck(),
     DeviceDocumentationCheck(),
