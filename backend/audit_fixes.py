@@ -738,6 +738,19 @@ def _needs_rename(name: Optional[str]) -> bool:
     return AP_NAME_PATTERN.fullmatch(name.strip()) is None
 
 
+def _extract_trailing_number(name: Optional[str]) -> Optional[int]:
+    text = (name or "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+)$", text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
 def _rename_device(
     base_url: str,
     headers: Dict[str, str],
@@ -919,7 +932,27 @@ def _summarize_site(
 
         region, site, location = parsed
         base = f"{region}{site}{location}AP"
-        candidate = _next_available_name(base, existing_names, name_numbers, used_suffixes)
+        trailing_number = _extract_trailing_number(current_name)
+        if trailing_number is not None:
+            candidate = f"{base}{trailing_number}"
+            if candidate in existing_names and candidate != current_name:
+                summary["failed"] += 1
+                summary["errors"].append(
+                    {
+                        "device_id": device_id,
+                        "mac": mac,
+                        "neighbor": neighbor,
+                        "reason": "Cannot preserve AP trailing number because the target name already exists.",
+                        "details": {
+                            "current_name": current_name,
+                            "attempted_name": candidate,
+                            "required_suffix": trailing_number,
+                        },
+                    }
+                )
+                continue
+        else:
+            candidate = _next_available_name(base, existing_names, name_numbers, used_suffixes)
 
         if not dry_run:
             try:
@@ -941,6 +974,12 @@ def _summarize_site(
                 )
                 existing_names.discard(candidate)
                 continue
+        if current_name:
+            existing_names.discard(current_name)
+        existing_names.add(candidate)
+        if trailing_number is not None:
+            used_suffixes.add(trailing_number)
+            name_numbers[base] = max(name_numbers.get(base, 0), trailing_number)
         summary["renamed"] += 1
         summary["updated"] += 1
         change_entry = {
