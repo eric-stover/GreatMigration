@@ -1282,6 +1282,99 @@ def test_switch_power_supply_health_passes_when_all_psus_ok():
     assert check.run(ctx) == []
 
 
+def test_switch_power_supply_health_reads_psus_from_module_stat():
+    ctx = SiteContext(
+        site_id="site-psu-4",
+        site_name="Branch",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-3",
+                "name": "SW-3",
+                "type": "switch",
+                "module_stat": [
+                    {
+                        "_idx": 0,
+                        "psus": [
+                            {"name": "Power Supply 0", "status": "ok", "description": "JPSU-65W-AC"},
+                            {"name": "Power Supply 1", "status": "absent", "description": ""},
+                        ],
+                    }
+                ],
+            },
+        ],
+    )
+
+    check = SwitchPowerSupplyHealthCheck()
+    findings = check.run(ctx)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "switch slot 0 Power Supply 1 status 'absent'" in finding.message
+    assert finding.details == {
+        "psu_issues": [
+            {
+                "name": "Power Supply 1",
+                "status": "absent",
+                "description": "",
+                "slot": "0",
+            }
+        ]
+    }
+
+
+def test_switch_power_supply_health_reads_stacked_psus_from_module_stat():
+    ctx = SiteContext(
+        site_id="site-psu-5",
+        site_name="HQ",
+        site={},
+        setting={},
+        templates=[],
+        devices=[
+            {
+                "id": "sw-stack-2",
+                "name": "SW-STACK-2",
+                "type": "switch",
+                "module_stat": [
+                    {
+                        "_idx": 0,
+                        "psus": [
+                            {"name": "Power Supply 0", "status": "ok", "description": "JPSU-920W-AC-AFO"},
+                            {"name": "Power Supply 1", "status": "ok", "description": "JPSU-920W-AC-AFO"},
+                        ],
+                    },
+                    {
+                        "_idx": 2,
+                        "psus": [
+                            {"name": "Power Supply 0", "status": "ok", "description": "JPSU-920W-AC-AFO"},
+                            {"name": "Power Supply 1", "status": "absent", "description": ""},
+                        ],
+                    },
+                ],
+            },
+        ],
+    )
+
+    check = SwitchPowerSupplyHealthCheck()
+    findings = check.run(ctx)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "switch slot 2 Power Supply 1 status 'absent'" in finding.message
+    assert finding.details == {
+        "psu_issues": [
+            {
+                "name": "Power Supply 1",
+                "status": "absent",
+                "description": "",
+                "slot": "2",
+            }
+        ]
+    }
+
+
 def test_spare_switch_presence_flags_missing_spare():
     ctx = SiteContext(
         site_id="site-spare-1",

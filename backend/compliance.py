@@ -1180,6 +1180,35 @@ def _iter_psu_entries(raw_psus: Any) -> Iterable[Dict[str, Any]]:
                         yield nested
 
 
+def _extract_module_slot(module: Mapping[str, Any]) -> Optional[str]:
+    for key in ("_idx", "fpc_idx", "slot", "slot_id", "member_id", "node_id", "unit"):
+        value = module.get(key)
+        if isinstance(value, (int, float)):
+            return str(int(value))
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _iter_device_psu_entries(device: Mapping[str, Any]) -> Iterable[Dict[str, Any]]:
+    for psu in _iter_psu_entries(device.get("psus")):
+        yield dict(psu)
+
+    module_stat = device.get("module_stat")
+    if not isinstance(module_stat, list):
+        return
+
+    for module in module_stat:
+        if not isinstance(module, Mapping):
+            continue
+        module_slot = _extract_module_slot(module)
+        for psu in _iter_psu_entries(module.get("psus")):
+            entry = dict(psu)
+            if module_slot and not entry.get("slot"):
+                entry["slot"] = module_slot
+            yield entry
+
+
 def _extract_psu_slot(psu: Mapping[str, Any]) -> Optional[str]:
     for key in ("slot", "slot_id", "switch_id", "member_id", "node_id", "unit", "stack_member"):
         value = psu.get(key)
@@ -2545,7 +2574,7 @@ class SwitchPowerSupplyHealthCheck(ComplianceCheck):
             if not _is_switch(device):
                 continue
 
-            psu_entries = list(_iter_psu_entries(device.get("psus")))
+            psu_entries = list(_iter_device_psu_entries(device))
             if not psu_entries:
                 continue
 
