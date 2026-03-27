@@ -43,7 +43,7 @@ SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
     r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)[A-Z]{2}\d+$"
 )
 SPARE_SWITCH_LOCATION_EXTRACT_PATTERN = re.compile(
-    r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)SPARE$"
+    r"^(?P<region>NA|LA|EU|AP)(?P<site>[A-Z]{3})(?P<location>MDF|IDF\d+)(?:SPARE|SS)$"
 )
 
 
@@ -506,7 +506,7 @@ def _propose_spare_switch_name(current_name: str) -> Optional[str]:
         match = SPARE_SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
     if not match:
         return None
-    candidate = f"{match.group('region')}{match.group('site')}MDFSPARE"
+    candidate = f"{match.group('region')}{match.group('site')}MDFSS"
     if SWITCH_LLDPNAME_PATTERN and SWITCH_LLDPNAME_PATTERN.fullmatch(candidate) is None:
         return None
     return candidate

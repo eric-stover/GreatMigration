@@ -2117,7 +2117,7 @@ class ConfigurationOverridesCheck(ComplianceCheck):
 
 
 DEFAULT_SWITCH_NAME_PATTERN = (
-    r"^(NA|LA|EU|AP)[A-Z]{3}(?:MDFSPARE|MDF(AS|CS|WS)\d+|IDF\d+(AS|CS|WS)\d+)$"
+    r"^(NA|LA|EU|AP)[A-Z]{3}(?:MDF(AS|CS|WS|SS)\d+|IDF\d+(AS|CS|WS)\d+)$"
 )
 
 DEFAULT_AP_NAME_PATTERN = r"^(NA|LA|EU|AP)[A-Z]{3}(?:MDF|IDF\d+)AP\d+$"
@@ -2824,7 +2824,7 @@ class DeviceNamingConventionCheck(ComplianceCheck):
                 if label == "Switch" and pattern.pattern == DEFAULT_SWITCH_NAME_PATTERN:
                     message = (
                         "Switch name does not match required convention (e.g., NACHIMDFWS1, "
-                        "NACHIIDF1AS3, or NACHIMDFSPARE)."
+                        "NACHIIDF1AS3, or NACHIMDFSS1)."
                     )
                 else:
                     message = f"{label} name does not match required convention."
