@@ -701,7 +701,7 @@ def test_execute_action_sets_spare_switch_role_and_name(monkeypatch):
     assert len(calls["put"]) == 2
     assert calls["put"][0][0].endswith("/sites/site-1/devices/sw-1")
     assert calls["put"][0][1] == {"port_config": {}}
-    assert calls["put"][1][1] == {"role": "spare", "name": "NAABCMDFSPARE"}
+    assert calls["put"][1][1] == {"role": "spare", "name": "NAABCMDFSS"}
 
 
 def test_execute_action_blocks_spare_switch_in_use(monkeypatch):
@@ -774,7 +774,7 @@ def test_execute_action_normalizes_spare_switch_name(monkeypatch):
     assert summary["updated"] == 1
     assert summary["failed"] == 0
     assert len(calls["put"]) == 2
-    assert calls["put"][1][1] == {"role": "spare", "name": "NAWHPMDFSPARE"}
+    assert calls["put"][1][1] == {"role": "spare", "name": "NAWHPMDFSS"}
 
 
 def test_execute_action_allows_active_uplink_pic_interfaces(monkeypatch):

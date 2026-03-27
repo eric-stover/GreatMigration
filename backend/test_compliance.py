@@ -2046,7 +2046,7 @@ def test_device_naming_convention_enforces_pattern():
         templates=[],
         devices=[
             {"id": "good1", "name": "NAABCMDFAS1", "type": "switch", "status": "connected"},
-            {"id": "spare", "name": "NAABCMDFSPARE", "type": "switch", "status": "connected"},
+            {"id": "spare", "name": "NAABCMDFSS", "type": "switch", "status": "connected"},
             {"id": "bad1", "name": "NaABCMDFAS2", "type": "switch", "status": "connected"},
             {"id": "bad2", "name": "NAABCIDFAS3", "type": "switch", "status": "connected"},
             {"id": "ignore1", "name": "ap-1", "type": "ap", "status": "connected"},
@@ -2284,7 +2284,7 @@ def test_env_pattern_loader_strips_wrappers(monkeypatch, env_value):
 def test_env_pattern_loader_handles_double_backslashes(monkeypatch):
     monkeypatch.setenv(
         "SWITCH_NAME_REGEX_PATTERN",
-        r"^(NA|LA|EU|AP)[A-Z]{3}(?:MDFSPARE|MDF(AS|CS|WS)\\d+|IDF\\d+(AS|CS|WS)\\d+)$",
+        r"^(NA|LA|EU|AP)[A-Z]{3}(?:MDFSS|MDF(AS|CS|WS)\\d+|IDF\\d+(AS|CS|WS)\\d+)$",
     )
     from compliance import _load_pattern_from_env
 
