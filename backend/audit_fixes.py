@@ -506,7 +506,11 @@ def _propose_spare_switch_name(current_name: str) -> Optional[str]:
         match = SPARE_SWITCH_LOCATION_EXTRACT_PATTERN.match(normalized_name)
     if not match:
         return None
-    candidate = f"{match.group('region')}{match.group('site')}MDFSS"
+
+    suffix_match = re.search(r"(\d+)$", normalized_name)
+    suffix = suffix_match.group(1) if suffix_match else "1"
+
+    candidate = f"{match.group('region')}{match.group('site')}MDFSS{suffix}"
     if SWITCH_LLDPNAME_PATTERN and SWITCH_LLDPNAME_PATTERN.fullmatch(candidate) is None:
         return None
     return candidate
