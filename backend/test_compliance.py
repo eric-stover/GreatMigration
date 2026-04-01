@@ -643,6 +643,26 @@ def test_refresh_standards_accepts_string_tags(monkeypatch, tmp_path):
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
 
 
+
+
+def test_refresh_standards_accepts_switch_tag_field(monkeypatch, tmp_path):
+    standards_path = tmp_path / "standard_fw_versions.json"
+    monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    def _fake_fetch(device_type):
+        if device_type == "switch":
+            return [{"model": "EX2300", "version": "20.4R3-S4", "tag": "junos_suggested"}]
+        if device_type == "ap":
+            return []
+        return []
+
+    monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
+
+    compliance._refresh_firmware_standards_if_needed(standards_path)
+
+    written = json.loads(standards_path.read_text(encoding="utf-8"))
+    assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
+
 def test_refresh_standards_uses_ap_alpha_tag_and_drops_internal_version_field(monkeypatch, tmp_path):
     standards_path = tmp_path / "standard_fw_versions.json"
     monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)

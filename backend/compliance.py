@@ -604,16 +604,19 @@ def _standards_doc_has_versions(doc: Mapping[str, Any]) -> bool:
 
 
 def _row_matches_standard_firmware_filter(row: Mapping[str, Any], device_type: str) -> bool:
+    tag = row.get("tag")
     if device_type == "ap":
-        tag = row.get("tag")
         return isinstance(tag, str) and tag.strip().lower() == "alpha"
 
-    tags = row.get("tags")
     normalized_tags: Set[str] = set()
+    tags = row.get("tags")
     if isinstance(tags, list):
-        normalized_tags = {str(tag).strip().lower() for tag in tags if str(tag).strip()}
+        normalized_tags = {str(item).strip().lower() for item in tags if str(item).strip()}
     elif isinstance(tags, str):
         normalized_tags = {part.strip().lower() for part in tags.split(",") if part.strip()}
+
+    if isinstance(tag, str) and tag.strip():
+        normalized_tags.add(tag.strip().lower())
 
     return SUGGESTED_FIRMWARE_TAG.lower() in normalized_tags
 
