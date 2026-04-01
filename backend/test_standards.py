@@ -85,6 +85,43 @@ def test_api_standards_table_ok_shape(monkeypatch, tmp_path):
     assert len(data["table"]["columns"]) == 6
 
 
+
+
+def test_api_standards_table_triggers_refresh_before_read(monkeypatch, tmp_path):
+    app = importlib.reload(importlib.import_module("app"))
+
+    standards_path = tmp_path / "standard_fw_versions.json"
+    standards_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app, "_firmware_standards_path", lambda: standards_path)
+
+    calls = {}
+
+    def _fake_refresh(path):
+        calls["path"] = path
+        standards_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": "2026-01-02T03:04:05Z",
+                    "models": {"switch": {"EX4400-48P": [{"version": "24.4R2.10"}]}, "ap": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(app, "_refresh_firmware_standards_if_needed", _fake_refresh)
+    monkeypatch.setattr(app, "_load_mist_token", lambda: "token")
+    monkeypatch.setattr(app, "_discover_org_ids", lambda base_url, headers: ["org-1"])
+    monkeypatch.setattr(
+        app,
+        "_mist_get_json",
+        lambda base_url, headers, path, optional=False: {"results": [{"model": "EX4400-48P", "count": 10}]},
+    )
+
+    data = app.api_standards_table()
+
+    assert calls["path"] == standards_path
+    assert [row["model"] for row in data["table"]["rows"]] == ["EX4400-48P"]
+
 def test_api_standards_table_filters_rows_to_production_models(monkeypatch, tmp_path):
     app = importlib.reload(importlib.import_module("app"))
 

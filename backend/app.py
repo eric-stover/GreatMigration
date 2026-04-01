@@ -54,7 +54,12 @@ from translate_showtech import (
 )  # type: ignore
 import ssh_collect
 from fpdf import FPDF
-from compliance import SiteAuditRunner, SiteContext, build_default_runner
+from compliance import (
+    SiteAuditRunner,
+    SiteContext,
+    build_default_runner,
+    _refresh_firmware_standards_if_needed,
+)
 from audit_fixes import execute_audit_action
 from audit_actions import AP_RENAME_ACTION_ID
 from audit_history import load_site_history
@@ -647,6 +652,7 @@ def standards_page():
 
 @app.get("/api/standards")
 def api_standards_table():
+    _refresh_firmware_standards_if_needed(_firmware_standards_path())
     table = _build_standards_table_payload()
     token = _load_mist_token()
     headers = _mist_headers(token)
