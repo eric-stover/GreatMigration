@@ -59,10 +59,37 @@ def ensure_git_repo(repo_url: str | None, target_dir: Path, branch: str):
 
     git_dir = target_dir / ".git"
     if git_dir.exists():
-        print(f"Updating existing repo in {target_dir} ...")
-        run(["git", "fetch", "origin"], cwd=target_dir)
-        run(["git", "checkout", branch], cwd=target_dir)
-        run(["git", "pull", "--rebase", "origin", branch], cwd=target_dir)
+        # Check current branch
+        try:
+            current_branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], 
+                cwd=str(target_dir), 
+                text=True,
+                stderr=subprocess.DEVNULL
+            ).strip()
+        except Exception:
+            current_branch = ""
+
+        # Check for local changes (tracked files only)
+        status = subprocess.check_output(["git", "status", "--porcelain"], cwd=str(target_dir), text=True).strip()
+        has_changes = any(line.strip() and not line.startswith("??") for line in status.splitlines())
+
+        if current_branch != branch:
+            if has_changes:
+                print(f"\n! Warning: Local changes detected on branch '{current_branch}'.")
+                print(f"! Skipping switch to '{branch}' to avoid stashing/committing.")
+                print("! Please switch branches manually when ready.")
+            else:
+                print(f"Switching from '{current_branch}' to '{branch}' ...")
+                run(["git", "checkout", branch], cwd=target_dir)
+
+        # Only pull if clean and on the right branch
+        if not has_changes and current_branch == branch:
+            print(f"Updating branch '{branch}' in {target_dir} ...")
+            run(["git", "fetch", "origin"], cwd=target_dir)
+            run(["git", "pull", "--rebase", "origin", branch], cwd=target_dir)
+        elif has_changes:
+            print(f"\n! Skipping update of '{branch}' due to local changes.")
     else:
         if not repo_url:
             raise SystemExit("Repo not found locally and --repo URL not provided.")
@@ -191,6 +218,31 @@ def ensure_env_file(project_dir: Path) -> int | None:
     print(f"Wrote {env_file}")
     return int(port)
 
+def ensure_standard_fw_versions_file(project_dir: Path):
+    backend = project_dir / "backend"
+    dest = backend / "standard_fw_versions.json"
+    if not dest.exists():
+        default_content = {
+            "generated_at": None,
+            "models": {
+                "switch": {},
+                "ap": {}
+            }
+        }
+        dest.write_text(json.dumps(default_content, indent=2), encoding="utf-8")
+        print(f"Created default {dest}")
+
+def ensure_tmp_dirs(project_dir: Path):
+    tmp_ssh_jobs = project_dir / "tmp_ssh_jobs"
+    if not tmp_ssh_jobs.exists():
+        tmp_ssh_jobs.mkdir(parents=True, exist_ok=True)
+        print(f"Created {tmp_ssh_jobs}")
+    
+    logs_dir = project_dir / "backend" / "logs"
+    if not logs_dir.exists():
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Created {logs_dir}")
+
 def ensure_port_rules_file(project_dir: Path):
     backend = project_dir / "backend"
     sample = backend / "port_rules.sample.json"
@@ -201,7 +253,9 @@ def ensure_port_rules_file(project_dir: Path):
         shutil.copy(sample, dest)
         print(f"Copied {sample} to {dest}")
     else:
-        print(f"No sample port rules found at {sample}; skipping")
+        # Create an empty one if no sample found
+        dest.write_text("[]\n", encoding="utf-8")
+        print(f"Created empty {dest}")
 
 def load_env_from_file(env_path: Path) -> Dict[str, str]:
     """Very small .env loader to pass vars to uvicorn process in case app doesn't load automatically."""
@@ -261,6 +315,8 @@ def main():
     ensure_requirements(project_dir, vpython)
     env_port = ensure_env_file(project_dir)
     ensure_port_rules_file(project_dir)
+    ensure_standard_fw_versions_file(project_dir)
+    ensure_tmp_dirs(project_dir)
 
     port = args.port if args.port is not None else env_port or 8000
 

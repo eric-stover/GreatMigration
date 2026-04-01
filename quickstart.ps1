@@ -37,11 +37,44 @@ function Ensure-GitRepo {
     git clone --branch $branch $url $dir
   } else {
     Push-Location $dir
-    Write-Host "Updating existing repo in $dir ..." -ForegroundColor Cyan
-    git fetch origin
-    git checkout $branch
-    git pull --rebase origin $branch
-    Pop-Location
+    try {
+      # Check current branch
+      $currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+      
+      # Check for local changes (tracked files only)
+      $status = (git status --porcelain).Trim()
+      $hasChanges = $false
+      if ($status) {
+        foreach ($line in $status.Split("`n")) {
+          if (-not $line.Trim().StartsWith("??")) {
+            $hasChanges = $true
+            break
+          }
+        }
+      }
+
+      if ($currentBranch -ne $branch) {
+        if ($hasChanges) {
+          Write-Host "`n! Warning: Local changes detected on branch '$currentBranch'." -ForegroundColor Yellow
+          Write-Host "! Skipping switch to '$branch' to avoid stashing/committing." -ForegroundColor Yellow
+          Write-Host "! Please switch branches manually when ready." -ForegroundColor Yellow
+        } else {
+          Write-Host "Switching from '$currentBranch' to '$branch' ..." -ForegroundColor Cyan
+          git checkout $branch
+        }
+      }
+
+      # Only pull if clean and on the right branch
+      if (-not $hasChanges -and $currentBranch -eq $branch) {
+        Write-Host "Updating branch '$branch' in $dir ..." -ForegroundColor Cyan
+        git fetch origin
+        git pull --rebase origin $branch
+      } elseif ($hasChanges) {
+        Write-Host "`n! Skipping update of '$branch' due to local changes." -ForegroundColor Yellow
+      }
+    } finally {
+      Pop-Location
+    }
   }
 }
 
@@ -166,6 +199,37 @@ function Ensure-Env {
   return [int]$port
 }
 
+function Ensure-StandardFwVersions {
+  param([string]$projectDir)
+  $dest = Join-Path $projectDir "backend/standard_fw_versions.json"
+  if (-not (Test-Path $dest)) {
+    $defaultContent = @{
+      generated_at = $null
+      models = @{
+        switch = @{}
+        ap = @{}
+      }
+    } | ConvertTo-Json -Depth 5
+    Set-Content -Path $dest -Value $defaultContent -Encoding UTF8
+    Write-Host "Created default $dest" -ForegroundColor Green
+  }
+}
+
+function Ensure-TmpDirs {
+  param([string]$projectDir)
+  $tmpSshJobs = Join-Path $projectDir "tmp_ssh_jobs"
+  if (-not (Test-Path $tmpSshJobs)) {
+    New-Item -ItemType Directory -Path $tmpSshJobs | Out-Null
+    Write-Host "Created $tmpSshJobs" -ForegroundColor Cyan
+  }
+
+  $logsDir = Join-Path $projectDir "backend/logs"
+  if (-not (Test-Path $logsDir)) {
+    New-Item -ItemType Directory -Path $logsDir | Out-Null
+    Write-Host "Created $logsDir" -ForegroundColor Cyan
+  }
+}
+
 function Ensure-PortRules {
   param([string]$projectDir)
   $sample = Join-Path $projectDir "backend/port_rules.sample.json"
@@ -176,7 +240,8 @@ function Ensure-PortRules {
     Copy-Item -Path $sample -Destination $dest
     Write-Host "Copied $sample to $dest" -ForegroundColor Cyan
   } else {
-    Write-Host "Sample port rules not found at $sample" -ForegroundColor Yellow
+    Set-Content -Path $dest -Value "[]`n" -Encoding UTF8
+    Write-Host "Created empty $dest" -ForegroundColor Cyan
   }
 }
 
@@ -221,6 +286,8 @@ $venvPython = Join-Path $venvPath "Scripts\python.exe"
 Ensure-Requirements -projectDir $projectDir -venvPython $venvPython
 $envPort = Ensure-Env -projectDir $projectDir
 Ensure-PortRules -projectDir $projectDir
+Ensure-StandardFwVersions -projectDir $projectDir
+Ensure-TmpDirs -projectDir $projectDir
 
 if (-not $PSBoundParameters.ContainsKey('Port') -and $envPort -ne 0) { $Port = $envPort }
 if (-not $Port) { $Port = 8000 }

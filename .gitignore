@@ -23,3 +23,6 @@ backend/replacement_rules.json
 
 # Local standard firmware versions
 backend/standard_fw_versions.json
+
+# Temp SSH jobs
+tmp_ssh_jobs/
