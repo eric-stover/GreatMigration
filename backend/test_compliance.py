@@ -414,7 +414,9 @@ def test_configuration_overrides_check_detects_template_differences():
     assert access2_findings, "Access switch IP violations should be reported"
 
 
-def _write_standard_versions(path: Path, *, switch_versions, ap_versions, generated_at="2025-01-01T00:00:00Z"):
+def _write_standard_versions(path: Path, *, switch_versions, ap_versions, generated_at=None):
+    if generated_at is None:
+        generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = {
         "generated_at": generated_at,
         "sources": {},
@@ -428,8 +430,6 @@ def _write_standard_versions(path: Path, *, switch_versions, ap_versions, genera
         },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
-
-
 
 
 def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
@@ -452,7 +452,7 @@ def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
         if device_type == "switch":
             return [{"model": "EX2300", "version": "20.4R3-S4", "tags": ["junos_suggested"], "record_id": "1"}]
         if device_type == "ap":
-            return [{"model": "AP32", "version": "0.12.27452", "tags": ["junos_suggested"], "record_id": "2"}]
+            return [{"model": "AP32", "version": "0.12.27452", "tag": "alpha", "tags": ["alpha"], "record_id": "2"}]
         return []
 
     monkeypatch.setattr(compliance, "_fetch_versions_for_type", _fake_fetch)
@@ -464,6 +464,7 @@ def test_refresh_standards_when_recent_file_is_empty(monkeypatch, tmp_path):
     written = json.loads(standards_path.read_text(encoding="utf-8"))
     assert written["models"]["switch"]["EX2300"][0]["version"] == "20.4R3-S4"
     assert written["models"]["ap"]["AP32"][0]["version"] == "0.12.27452"
+
 
 
 
@@ -957,10 +958,11 @@ def test_firmware_management_check_allows_approved_versions(monkeypatch, tmp_pat
 
 def test_firmware_management_check_uses_model_specific_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standards.json"
+    recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     standards_path.write_text(
         json.dumps(
             {
-                "generated_at": "2025-01-01T00:00:00Z",
+                "generated_at": recent,
                 "sources": {},
                 "models": {
                     "switch": {
@@ -1000,10 +1002,11 @@ def test_firmware_management_check_uses_model_specific_versions(monkeypatch, tmp
 
 def test_firmware_management_check_uses_ap_model_specific_versions(monkeypatch, tmp_path):
     standards_path = tmp_path / "standards.json"
+    recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     standards_path.write_text(
         json.dumps(
             {
-                "generated_at": "2025-01-01T00:00:00Z",
+                "generated_at": recent,
                 "sources": {},
                 "models": {
                     "switch": {},
@@ -1043,10 +1046,11 @@ def test_firmware_management_check_uses_ap_model_specific_versions(monkeypatch, 
 
 def test_firmware_management_check_normalizes_model_lookup(monkeypatch, tmp_path):
     standards_path = tmp_path / "standards.json"
+    recent = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     standards_path.write_text(
         json.dumps(
             {
-                "generated_at": "2025-01-01T00:00:00Z",
+                "generated_at": recent,
                 "sources": {},
                 "models": {
                     "switch": {
@@ -1084,6 +1088,9 @@ def test_firmware_management_check_skips_when_unconfigured(monkeypatch, tmp_path
     standards_path = tmp_path / "empty-standards.json"
     _write_standard_versions(standards_path, switch_versions=[], ap_versions=[])
     monkeypatch.setattr(compliance, "_firmware_standards_path", lambda: standards_path)
+
+    # Mock refresh to avoid populating from network when file is empty
+    monkeypatch.setattr(compliance, "_refresh_firmware_standards_if_needed", lambda path=None: {"models": {"switch": {}, "ap": {}}})
 
     ctx = SiteContext(
         site_id="site-fw-empty",
