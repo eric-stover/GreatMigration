@@ -115,6 +115,7 @@ Standards gives you a live firmware baseline view so operators can see what vers
 **What it does**
 
 - Displays a model-by-model firmware standards matrix for switches and APs.
+- **Auto-Populates on Install**: On a new setup, the tool automatically fetches the latest suggested releases from the Mist API so your baseline is ready immediately.
 - Shows multiple historical standards (Standard 1..N) so you can compare recency and baseline drift.
 - Supports fast client-side filtering by model, device type, or version string.
 - Exposes refresh timestamp metadata to confirm when the standards cache was last generated.
@@ -129,9 +130,9 @@ Standards gives you a live firmware baseline view so operators can see what vers
 **How it works**
 
 - The Standards page (`/standards`) loads a table from `/api/standards`.
-- The backend builds a normalized matrix from `standard_fw_versions.json`, flattening switch/AP model data into rows.
-- Each row is padded/truncated to a fixed number of standard columns so comparisons are consistent.
-- Firmware standards data is refreshed through compliance logic that updates the cache from Mist API suggested versions when stale.
+- The backend builds a normalized matrix from `standard_fw_versions.json`.
+- **First-Run Behavior**: If `standard_fw_versions.json` is missing or empty, the backend automatically triggers a refresh from Mist to populate it.
+- Firmware standards data is refreshed periodically (every 90 days by default) or can be manually triggered if the cache is stale.
 - When Standard 1 changes, the automation syncs the org switch **auto-upgrade custom version** target for onboarding/zero-touch provisioning workflows; this does **not** retroactively upgrade switches that are already connected and managed.
 
 **Safety notes**
@@ -264,6 +265,8 @@ This sequence minimizes risk by moving from policy/reference -> conversion plann
 
 ## Getting started
 
+GreatMigration uses automation to simplify your first-run setup. Your local configuration files (like `.env`, `port_rules.json`, and `standard_fw_versions.json`) are **strictly local**. They are ignored by Git so that you can switch branches without losing your custom data or site settings.
+
 ### Prerequisites
 
 - Git
@@ -273,7 +276,7 @@ This sequence minimizes risk by moving from policy/reference -> conversion plann
 
 ### Quick start scripts
 
-GreatMigration includes both Python and PowerShell bootstrap scripts.
+These scripts handle cloning the repository, building the virtual environment, and initializing your local configuration files.
 
 #### Python (cross-platform)
 
@@ -283,15 +286,14 @@ cd ./GreatMigration
 python3 quickstart.py
 ```
 
-What it does:
+**What it does:**
 
-- Clones/updates repo.
-- Builds `.venv` and installs backend dependencies.
-- Prompts for key settings and writes `backend/.env`.
-- Ensures `backend/port_rules.json` exists.
-- Starts `uvicorn` unless `--no-start` is set.
+- **Sync Management**: Clones or updates the repo. If you have uncommitted changes on your current branch, it will skip updates to protect your work.
+- **Environment Build**: Creates `.venv`, installs dependencies, and ensures `tmp_ssh_jobs/` and `logs/` directories exist.
+- **Local Config Initialization**: Prompts for key settings to create `backend/.env` and automatically initializes `backend/port_rules.json` and `backend/standard_fw_versions.json` if they are missing.
+- **Server Start**: Starts the API via `uvicorn` on port 8000 by default.
 
-Useful options:
+**Useful options:**
 
 - `--repo`, `--dir`, `--branch`
 - `--port`
@@ -304,15 +306,15 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 ./quickstart.ps1 -RepoUrl https://github.com/ejstover/GreatMigration.git -TargetDir C:\GreatMigration
 ```
 
-What it does:
+**What it does:**
 
-- Mirrors Python quickstart behavior for Windows environments.
-- Includes pip/bootstrap handling where needed.
+- Mirrors the Python quickstart behavior for Windows environments.
+- Handles automated setup of local JSON config files and environment directories.
 - Supports `-Branch`, `-Port`, and `-NoStart` switches.
 
-Both scripts reuse previously saved `.env` values so repeat runs are fast and predictable.
-
 ### Manual setup
+
+If you prefer to configure the tool manually:
 
 1. **Clone + install dependencies**
    ```bash
@@ -324,29 +326,34 @@ Both scripts reuse previously saved `.env` values so repeat runs are fast and pr
    ```
 
 2. **Create `backend/.env`**
-   Required core values:
-   - `MIST_TOKEN`
-   - `SESSION_SECRET`
-   - `AUTH_METHOD=local` or `AUTH_METHOD=ldap`
+   The application relies on this file for all core settings. You can copy `.env.sample` to get started.
 
-   Common optional values:
-   - `MIST_BASE_URL`, `MIST_ORG_ID`, `SWITCH_TEMPLATE_ID`, `API_PORT`, `HELP_URL`
-   - `SESSION_HTTPS_ONLY=true` (recommended for production)
+   **Required Core Values:**
+   - `MIST_TOKEN`: Your API token (requires write access for push/fix actions).
+   - `SESSION_SECRET`: A long random string for session security.
+   - `AUTH_METHOD`: Set to `local` or `ldap`.
 
-   Local auth settings:
-   - `LOCAL_USERS`
-   - `LOCAL_PUSH_USERS` (optional)
+   **Common Configuration:**
+   - `MIST_BASE_URL`: Default is `https://api.ac2.mist.com`.
+   - `MIST_ORG_ID`: Preset your Organization ID for faster workflows.
+   - `SWITCH_TEMPLATE_ID`: The Mist Switch Template to align against.
+   - `API_PORT`: Default is `8000`.
+   - `HELP_URL`: Link to your internal runbook or documentation.
 
-   LDAP settings:
-   - `LDAP_SERVER_URL`
-   - `LDAP_SEARCH_BASE` or `LDAP_SEARCH_BASES`
-   - `LDAP_BIND_TEMPLATE` or service bind settings
-   - `PUSH_GROUP_DN`, optional `READONLY_GROUP_DN`
+   **Local Auth Settings (`AUTH_METHOD=local`):**
+   - `LOCAL_USERS`: Format `user1:pass1,user2:password2`.
+   - `LOCAL_PUSH_USERS`: Comma-separated list of users who can perform "Push" actions.
 
-3. **Optional policy/config files**
-   - Copy `backend/port_rules.sample.json` to `backend/port_rules.json`.
-   - Copy `backend/device_map.sample.json` to `backend/device_map.json` for custom hardware mappings.
-   - Copy `backend/replacement_rules.sample.json` to `backend/replacement_rules.json` if using customized replacement logic.
+   **LDAP Settings (`AUTH_METHOD=ldap`):**
+   - `LDAP_SERVER_URL`: Your directory server.
+   - `LDAP_SEARCH_BASE`: Root DN for searches.
+   - `PUSH_GROUP_DN`: Members of this group can perform "Push" actions.
+
+3. **Initialize Local Configuration**
+   The application requires these files to be present in the `backend/` directory:
+   - `port_rules.json`: Define your interface-to-usage mapping (see `port_rules.sample.json`).
+   - `standard_fw_versions.json`: Stores your firmware baseline (initialized automatically on first run).
+   - `device_map.json`: Optional custom hardware mappings (see `device_map.sample.json`).
 
 4. **Run the app**
    ```bash
