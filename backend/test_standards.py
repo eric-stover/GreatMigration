@@ -70,6 +70,9 @@ def test_api_standards_table_ok_shape(monkeypatch, tmp_path):
     standards_path.write_text('{"generated_at": null, "models": {"switch": {}, "ap": {}}}', encoding="utf-8")
     monkeypatch.setattr(app, "_firmware_standards_path", lambda: standards_path)
 
+    # Mock the refresh call so it doesn't trigger a real network fetch
+    monkeypatch.setattr(app, "_refresh_firmware_standards_if_needed", lambda path: None)
+
     monkeypatch.setattr(app, "_load_mist_token", lambda: "token")
     monkeypatch.setattr(app, "_discover_org_ids", lambda base_url, headers: ["org-1"])
     monkeypatch.setattr(
