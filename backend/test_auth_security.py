@@ -17,7 +17,7 @@ def _middleware_options(app: FastAPI):
     raise AssertionError("SessionMiddleware not installed")
 
 
-def test_local_auth_uses_secure_session_cookies_by_default(monkeypatch):
+def test_local_auth_uses_http_compatible_session_cookies_by_default(monkeypatch):
     monkeypatch.delenv("SESSION_HTTPS_ONLY", raising=False)
     monkeypatch.setenv("LOCAL_USERS", "alice:strong-password")
 
@@ -26,7 +26,7 @@ def test_local_auth_uses_secure_session_cookies_by_default(monkeypatch):
     auth_local.install_auth(app)
 
     options = _middleware_options(app)
-    assert options["https_only"] is True
+    assert options["https_only"] is False
 
 
 def test_ldap_auth_allows_http_override_for_local_dev(monkeypatch):

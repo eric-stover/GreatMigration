@@ -409,7 +409,7 @@ If you prefer to configure the tool manually:
 - `AUTH_METHOD=local` uses `LOCAL_USERS` (`username:password` list).
 - `AUTH_METHOD=ldap` uses LDAP bind/search plus group DNs.
 - Push rights come from `PUSH_GROUP_DN` (LDAP) or `LOCAL_PUSH_USERS` (local).
-- `SESSION_HTTPS_ONLY=true` is strongly recommended in production.
+- `SESSION_HTTPS_ONLY` defaults to `false` for HTTP compatibility; set it to `true` in production.
 
 ### Mist connectivity
 
